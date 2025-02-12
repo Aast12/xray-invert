@@ -1,9 +1,8 @@
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import convolve2d
-from jaxtyping import ArrayLike, Array, Num, Int, Float
-from jax import jit
-from jax.tree_util import register_pytree_node, register_dataclass
+from jaxtyping import Array, Num, Int, Float
+from jax.tree_util import register_dataclass
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -11,7 +10,6 @@ from typing import Callable
 ImageType = Num[Array, "height width"]
 
 
-@jit
 def mean_filter(image, size):
     kernel = jnp.ones((size, size)) / (size * size)
     return convolve2d(image, kernel, mode="same")
@@ -20,14 +18,19 @@ def mean_filter(image, size):
 @register_dataclass
 @dataclass
 class MultiscaleProcessingWeights:
-    filter_sizes: Int[Array, "levels"]
+    # filter sizes are static for now, not trivial to optimize discrete values
+    filter_sizes: Int[Array, "levels"] = field(
+        metadata=dict(static=True), compare=False
+    )
     unsharp_weights: Float[Array, "levels"]
     filter_fn: Callable[[ImageType, Int], ImageType] = field(
-        default=mean_filter, metadata=dict(static=True)
+        default=mean_filter, metadata=dict(static=True), compare=False
     )
 
+    def __post_init__(self):
+        self.filter_sizes = jax.lax.stop_gradient(self.filter_sizes)
 
-@jit
+# @jit
 def multiscale_processing(
     image: Num[Array, "height width"],
     unsharp_weights: Float[Array, "levels"],
@@ -101,12 +104,3 @@ def apply_lut(
     lut = create_lookup_table(x, breakpoints, values)
 
     return jnp.interp(image, x, lut)
-
-
-@register_dataclass
-@dataclass
-class ModelWeights:
-    image: ImageType
-
-    w_multiscale_processing: MultiscaleProcessingWeights
-    w_lookup_table: LookupTableWeights
