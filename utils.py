@@ -26,8 +26,6 @@ DOMAIN_JNP_DTYPES = {
     ImageDomain.BIT_32: jnp.uint32,
 }
 
-VAR_2 = 2
-
 
 def read_image(path, mode=cv2.IMREAD_UNCHANGED, domain=ImageDomain.NORMALIZED):
     img = cv2.imread(path, mode)

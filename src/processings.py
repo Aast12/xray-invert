@@ -27,8 +27,6 @@ class MultiscaleProcessingWeights:
         default=mean_filter, metadata=dict(static=True), compare=False
     )
 
-    def __post_init__(self):
-        self.filter_sizes = jax.lax.stop_gradient(self.filter_sizes)
 
 # @jit
 def multiscale_processing(

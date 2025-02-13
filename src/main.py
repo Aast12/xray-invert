@@ -1,11 +1,8 @@
 import jax
 import jax.numpy as jnp
-from jax.scipy.signal import convolve2d
-from jaxtyping import ArrayLike, Array, Num, Int, Float
-from jax import jit
-from jax.tree_util import register_pytree_node, register_dataclass
+from jax.tree_util import register_dataclass
 from dataclasses import dataclass
-from processings import (
+from .processings import (
     apply_lut,
     multiscale_processing,
     ImageType,
@@ -18,7 +15,6 @@ from processings import (
 @dataclass
 class ModelWeights:
     image: ImageType
-
     w_multiscale_processing: MultiscaleProcessingWeights
     w_lookup_table: LookupTableWeights
 
@@ -26,9 +22,8 @@ class ModelWeights:
 def forward(
     og_image: ImageType,
     weights: tuple[LookupTableWeights, MultiscaleProcessingWeights],
-    filter_sizes,
 ):
-    image = 1.0 - og_image
+    image = -jnp.log(og_image)
 
     lut_weights, mup_weights = weights
 
@@ -41,33 +36,26 @@ def forward(
         image, breakpoints=breakpoints, values=values, partitions=int(partitions * 1000)
     )
 
-    filter_sizes = jax.lax.stop_gradient(filter_sizes)
+    filter_sizes = mup_weights.filter_sizes
 
     result = multiscale_processing(
         image, unsharp_weights, filter_sizes, filter_fn=lut_weights.filter_fn
     )
 
-    return jnp.clip(result, 0, 1)
+    return jnp.clip(result, 0.0, 1.0)
 
 
 def loss_fn(params: ModelWeights, target: ImageType):
     image = params.image
     weights = (params.w_lookup_table, params.w_multiscale_processing)
 
-    filter_sizes = jax.lax.stop_gradient(params.w_multiscale_processing.filter_sizes)
-
     # image, weights = params
-    pred = forward(image, weights, filter_sizes)
+    pred = forward(image, weights)
     mse = jnp.mean((pred - target) ** 2)
 
-    # normalized regularization
-    # reg = jnp.sum(jnp.abs(params.w_lookup_table.values))
-    # reg += jnp.sum(jnp.abs(params.w_multiscale_processing.unsharp_weights))
-    # reg += jnp.sum(jnp.abs(params.w_lookup_table.breakpoints))
-    # reg += jnp.sum(jnp.abs(params.w_lookup_table.partitions))
+    reg = jnp.sum(jnp.abs(params.image))
 
-    # loss = mse + 0.01 * reg
-    loss = mse
+    loss = mse + 0.01 * reg
     print(f"MSE in loss_fn: {loss}")
 
     return loss
@@ -106,8 +94,9 @@ def update_step(params: ModelWeights, target, lr):
 def optimize(target, filter_sizes=[3, 9, 27], n_steps=1000, lr=0.1, eps=1e-8):
     filter_sizes = jnp.array(filter_sizes, dtype=jnp.int16)
 
-    # x0 = jnp.ones_like(target, dtype=jnp.float32)
-    x0 = jnp.copy(target)
+    x0 = jnp.ones_like(target, dtype=jnp.float32)
+    # x0 = x0 / x0.sum()
+    # x0 = jnp.copy(target)
 
     breakpoints = jnp.array([0, 0.25, 0.75, 1.0])
     values = jnp.array([0, 0.1, 0.9, 1.0])

@@ -1,0 +1,16 @@
+[project]
+name = "thesis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ipykernel>=6.29.5",
+    "jax==0.5.0",
+    "jaxtyping>=0.2.37",
+    "matplotlib>=3.10.0",
+    "numpy>=2.2.2",
+    "opencv-python>=4.11.0.86",
+    "pillow>=11.1.0",
+    "scipy>=1.15.1",
+]
