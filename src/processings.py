@@ -1,3 +1,4 @@
+from pprint import pprint
 import jax
 import jax.numpy as jnp
 from jax.scipy.signal import convolve2d
@@ -15,7 +16,7 @@ def mean_filter(image, size):
     return convolve2d(image, kernel, mode="same")
 
 
-@register_dataclass
+@jax.tree_util.register_pytree_node_class
 @dataclass
 class MultiscaleProcessingWeights:
     # filter sizes are static for now, not trivial to optimize discrete values
@@ -26,6 +27,23 @@ class MultiscaleProcessingWeights:
     filter_fn: Callable[[ImageType, Int], ImageType] = field(
         default=mean_filter, metadata=dict(static=True), compare=False
     )
+
+    def tree_flatten(self):
+        children = (self.unsharp_weights,)
+        aux_data = ("unsharp_weights",), {
+            "filter_sizes": self.filter_sizes,
+            "filter_fn": self.filter_fn,
+        }
+        return children, aux_data
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        children_keys, aux = aux_data
+        children_data = dict(zip(children_keys, children))
+
+        all_args = {**aux, **children_data}
+
+        return cls(**all_args)
 
 
 # @jit
@@ -41,7 +59,7 @@ def multiscale_processing(
     blurred_pyramid = [image]
 
     for size in filter_sizes:
-        blurred = filter_fn(blurred_pyramid[-1], size)
+        blurred = filter_fn(blurred_pyramid[-1], int(size))
         blurred_pyramid.append(blurred)
 
     result = image.copy()
@@ -58,9 +76,6 @@ class LookupTableWeights:
     breakpoints: Float[Array, "breakpoints"]
     values: Float[Array, "breakpoints"]
     partitions: Float
-    filter_fn: Callable[[ImageType, Int], ImageType] = field(
-        default=mean_filter, metadata=dict(static=True)
-    )
 
 
 def create_lookup_table(

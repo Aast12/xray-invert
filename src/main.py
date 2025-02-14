@@ -9,6 +9,7 @@ from .processings import (
     LookupTableWeights,
     MultiscaleProcessingWeights,
 )
+import optax
 
 
 @register_dataclass
@@ -36,10 +37,10 @@ def forward(
         image, breakpoints=breakpoints, values=values, partitions=int(partitions * 1000)
     )
 
-    filter_sizes = mup_weights.filter_sizes
+    filter_sizes = jax.lax.stop_gradient(mup_weights.filter_sizes)
 
     result = multiscale_processing(
-        image, unsharp_weights, filter_sizes, filter_fn=lut_weights.filter_fn
+        image, unsharp_weights, filter_sizes, filter_fn=mup_weights.filter_fn
     )
 
     return jnp.clip(result, 0.0, 1.0)
@@ -61,50 +62,34 @@ def loss_fn(params: ModelWeights, target: ImageType):
     return loss
 
 
-def update_step(params: ModelWeights, target, lr):
-    loss_value_and_grad = jax.value_and_grad(loss_fn, argnums=0)
+def update_step(optimizer, params: ModelWeights, opt_state, target):
+    loss_value_and_grad = jax.value_and_grad(loss_fn)
     loss, grads = loss_value_and_grad(params, target)
-    grads: ModelWeights = grads
 
-    new_grads = ModelWeights(
-        image=params.image,
-        w_lookup_table=params.w_lookup_table,
-        w_multiscale_processing=params.w_multiscale_processing,
-    )
+    updates, opt_state = optimizer.update(grads, opt_state)
+    params = optax.apply_updates(params, updates)
 
-    new_grads.image = params.image - lr * grads.image
-    new_grads.w_lookup_table.breakpoints = (
-        params.w_lookup_table.breakpoints - lr * grads.w_lookup_table.breakpoints
-    )
-    new_grads.w_lookup_table.values = (
-        params.w_lookup_table.values - lr * grads.w_lookup_table.values
-    )
-    new_grads.w_lookup_table.partitions = (
-        params.w_lookup_table.partitions - lr * grads.w_lookup_table.partitions
-    )
-
-    new_grads.w_multiscale_processing.unsharp_weights = (
-        params.w_multiscale_processing.unsharp_weights
-        - lr * grads.w_multiscale_processing.unsharp_weights
-    )
-
-    return loss, grads, new_grads
+    return loss, grads, params, opt_state
 
 
-def optimize(target, filter_sizes=[3, 9, 27], n_steps=1000, lr=0.1, eps=1e-8):
+def optimize(
+    target,
+    filter_sizes=[3, 9, 27],
+    n_steps=1000,
+    lr=0.1,
+    eps=1e-8,
+    optimizer_builder=optax.adam,
+):
     filter_sizes = jnp.array(filter_sizes, dtype=jnp.int16)
 
     x0 = jnp.ones_like(target, dtype=jnp.float32)
-    # x0 = x0 / x0.sum()
-    # x0 = jnp.copy(target)
-
-    breakpoints = jnp.array([0, 0.25, 0.75, 1.0])
-    values = jnp.array([0, 0.1, 0.9, 1.0])
+    breakpoints = jnp.array([0, 0.5, 0.75, 1.0])
+    values = jnp.array([0, 0.0, 0.0, 0.0])
     partitions = 0.5
     unsharp_weights = jnp.ones(len(filter_sizes), dtype=jnp.float32) / len(filter_sizes)
 
     mup_weights = MultiscaleProcessingWeights(
-        filter_sizes=filter_sizes,
+        filter_sizes=jax.lax.stop_gradient(filter_sizes),
         unsharp_weights=unsharp_weights,
     )
     lut_weights = LookupTableWeights(
@@ -117,6 +102,8 @@ def optimize(target, filter_sizes=[3, 9, 27], n_steps=1000, lr=0.1, eps=1e-8):
     )
 
     params = model_weights
+    optimizer = optimizer_builder(learning_rate=lr)
+    opt_state = optimizer.init(params)
 
     losses = []
 
@@ -125,10 +112,10 @@ def optimize(target, filter_sizes=[3, 9, 27], n_steps=1000, lr=0.1, eps=1e-8):
             print(f"Converged after {step} steps")
             break
 
-        loss, grads, params = update_step(params, target, lr)
+        loss, _, params, opt_state = update_step(optimizer, params, opt_state, target)
         losses.append(loss)
 
         if step % 10 == 0:
             print(f"\nStep {step}, Loss: {loss:.6f}")
 
-    return params, losses
+    return opt_state, losses
