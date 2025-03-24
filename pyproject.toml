@@ -9,6 +9,7 @@ dependencies = [
     "jax==0.5.0",
     "jaxtyping>=0.2.37",
     "matplotlib>=3.10.0",
+    "nbdime>=4.0.2",
     "numpy>=2.2.2",
     "opencv-python>=4.11.0.86",
     "optax>=0.2.4",
