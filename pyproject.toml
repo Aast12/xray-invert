@@ -14,5 +14,7 @@ dependencies = [
     "opencv-python>=4.11.0.86",
     "optax>=0.2.4",
     "pillow>=11.1.0",
+    "pydicom>=3.0.1",
     "scipy>=1.15.1",
+    "wandb>=0.19.8",
 ]
