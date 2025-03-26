@@ -1,5 +1,5 @@
 [project]
-name = "xray-inversion"
+name = "chest-xray-sim"
 version = "0.1.0"
 description = "Recovering x-ray transmission map from processed chest x-ray images"
 readme = "README.md"
@@ -18,3 +18,6 @@ dependencies = [
     "scipy>=1.15.1",
     "wandb>=0.19.8",
 ]
+
+[tool.setuptools]
+packages = ['chest_xray_sim']
