@@ -1,1 +1,1 @@
-# Simulated Camera-based X-Ray images
+# Simulating Camera-Based Detector Chest X-Ray Images
