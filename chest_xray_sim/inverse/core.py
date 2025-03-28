@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
+
 def zero_grads():
     def init_fn(_):
         return ()
@@ -41,8 +42,6 @@ def base_optimize(
         assert (
             pred.shape == target.shape
         ), f"Shapes do not match: {pred.shape} != {target.shape}"
-
-        print(f"MSE in loss_fn: {loss}")
 
         return loss
 

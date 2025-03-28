@@ -5,6 +5,7 @@ description = "Recovering x-ray transmission map from processed chest x-ray imag
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "dm-pix>=0.4.4",
     "ipykernel>=6.29.5",
     "jax==0.5.0",
     "jaxtyping>=0.2.37",

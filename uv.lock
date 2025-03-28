@@ -291,6 +291,43 @@ wheels = [
 ]
 
 [[package]]
+name = "chest-xray-sim"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "dm-pix" },
+    { name = "ipykernel" },
+    { name = "jax" },
+    { name = "jaxtyping" },
+    { name = "matplotlib" },
+    { name = "nbdime" },
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "optax" },
+    { name = "pillow" },
+    { name = "pydicom" },
+    { name = "scipy" },
+    { name = "wandb" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "dm-pix", specifier = ">=0.4.4" },
+    { name = "ipykernel", specifier = ">=6.29.5" },
+    { name = "jax", specifier = "==0.5.0" },
+    { name = "jaxtyping", specifier = ">=0.2.37" },
+    { name = "matplotlib", specifier = ">=3.10.0" },
+    { name = "nbdime", specifier = ">=4.0.2" },
+    { name = "numpy", specifier = ">=2.2.2" },
+    { name = "opencv-python", specifier = ">=4.11.0.86" },
+    { name = "optax", specifier = ">=0.2.4" },
+    { name = "pillow", specifier = ">=11.1.0" },
+    { name = "pydicom", specifier = ">=3.0.1" },
+    { name = "scipy", specifier = ">=1.15.1" },
+    { name = "wandb", specifier = ">=0.19.8" },
+]
+
+[[package]]
 name = "chex"
 version = "0.1.88"
 source = { registry = "https://pypi.org/simple" }
@@ -455,6 +492,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604 },
+]
+
+[[package]]
+name = "dm-pix"
+version = "0.4.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "chex" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/8b/7d8d4b4646be35aa5a218335f9c0c1c7e3461e3fd997ecd10c03b3d5f27f/dm_pix-0.4.4.tar.gz", hash = "sha256:6139e3154feac8109dbc0859380f8e3a9f9465d3006a7b8c347e70ed875de1f7", size = 48566 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/8e/c3b962cc1f350fdb77531715362da2a915cd688a49b8c22959b43988d117/dm_pix-0.4.4-py3-none-any.whl", hash = "sha256:afd492b9d27a77a55522ce504f5360e2efde1bd9b70fd43b3f9a42219c1c4f23", size = 56747 },
 ]
 
 [[package]]
@@ -2319,39 +2368,4 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e6/30/fba0d96b4b5fbf5948ed3f4681f7da2f9f64512e1d303f94b4cc174c24a5/websocket_client-1.8.0.tar.gz", hash = "sha256:3239df9f44da632f96012472805d40a23281a991027ce11d2f45a6f24ac4c3da", size = 54648 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5a/84/44687a29792a70e111c5c477230a72c4b957d88d16141199bf9acb7537a3/websocket_client-1.8.0-py3-none-any.whl", hash = "sha256:17b44cc997f5c498e809b22cdf2d9c7a9e71c02c8cc2b6c56e7c2d1239bfa526", size = 58826 },
-]
-
-[[package]]
-name = "xray-inversion"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "ipykernel" },
-    { name = "jax" },
-    { name = "jaxtyping" },
-    { name = "matplotlib" },
-    { name = "nbdime" },
-    { name = "numpy" },
-    { name = "opencv-python" },
-    { name = "optax" },
-    { name = "pillow" },
-    { name = "pydicom" },
-    { name = "scipy" },
-    { name = "wandb" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "ipykernel", specifier = ">=6.29.5" },
-    { name = "jax", specifier = "==0.5.0" },
-    { name = "jaxtyping", specifier = ">=0.2.37" },
-    { name = "matplotlib", specifier = ">=3.10.0" },
-    { name = "nbdime", specifier = ">=4.0.2" },
-    { name = "numpy", specifier = ">=2.2.2" },
-    { name = "opencv-python", specifier = ">=4.11.0.86" },
-    { name = "optax", specifier = ">=0.2.4" },
-    { name = "pillow", specifier = ">=11.1.0" },
-    { name = "pydicom", specifier = ">=3.0.1" },
-    { name = "scipy", specifier = ">=1.15.1" },
-    { name = "wandb", specifier = ">=0.19.8" },
 ]

@@ -21,12 +21,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--raw", type=str, default="data/conventional_transmissionmap.tif")
 
 
-def dict_product(d):
-    keys = d.keys()
-    for element in itertools.product(*d.values()):
-        yield dict(zip(keys, element))
-
-
 def log_run_metrics(run, metrics, prefix):
     prefixed_metrics = {f"{prefix}_{key}": value for key, value in metrics.items()}
     for key, value in prefixed_metrics.items():
