@@ -60,9 +60,10 @@ def windowing(image, window_center, window_width, gamma):
     return x
 
 
-@prefixed_parameterized(["sigma", "kernel_size", "enhance_factor"])
-def unsharp_masking(image, sigma, kernel_size, enhance_factor):
+@prefixed_parameterized(["sigma", "enhance_factor"])
+def unsharp_masking(image, sigma, enhance_factor):
     x = jnp.expand_dims(image, axis=2)
+    kernel_size = int(4 * sigma) + 1
     blurred = gaussian_blur(x, sigma, kernel_size, padding="SAME")
     x = x + enhance_factor * (x - blurred)
     return x.squeeze()
