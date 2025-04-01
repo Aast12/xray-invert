@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import cv2
 from chest_xray_sim.inverse.operators import (
     negative_log,
@@ -8,6 +9,7 @@ from chest_xray_sim.inverse.operators import (
     range_normalize,
 )
 import chest_xray_sim.inverse.operators as ops
+import chest_xray_sim.inverse.metrics as metrics
 import wandb
 from chest_xray_sim.inverse.core import base_optimize
 from chest_xray_sim.utils.results import run_metrics
@@ -15,12 +17,15 @@ import utils
 import itertools
 import argparse
 import dm_pix as dmp
+from utils import experiment_args
 
-parser = argparse.ArgumentParser()
-_ = parser.add_argument(
-    "--raw", type=str, default="data/conventional_transmissionmap.tif"
-)
-_ = parser.add_argument("--target", type=str, default="data/conventional_processed.tif")
+# parser = argparse.ArgumentParser()
+# _ = parser.add_argument(
+#     "--raw", type=str, default="data/conventional_transmissionmap.tif"
+# )
+# _ = parser.add_argument("--target", type=str, default="data/conventional_processed.tif")
+#
+parser = experiment_args(root_dir=None, meta_path=None, img_dir=None)
 
 
 def log_run_metrics(run, metrics, prefix):
@@ -29,59 +34,43 @@ def log_run_metrics(run, metrics, prefix):
         run.summary[key] = value
 
 
-def run_optimization(
-    target, hyperparams, operator=None, loss_fn=None, w0=None, **opt_params
-):
-    assert operator is not None
-    assert loss_fn is not None
-    assert w0 is not None
+def forward(image, weights):
+    x = ops.negative_log(image)
+    x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
+    x = ops.unsharp_masking(x, weights["high_sigma"], weights["high_enhance_factor"])
+    x = ops.windowing(
+        x, weights["window_center"], weights["window_width"], weights["gamma"]
+    )
+    x = ops.range_normalize(x)
 
-    def_opt_params = dict(
-        target=target,
-        w0=w0,
-        lr=hyperparams["lr"],
-        loss_fn=loss_fn,
-        n_steps=hyperparams["n_steps"],
-        forward_fn=operator,
+    return x
+
+
+def loss(txm, weights, pred, target, tv_factor=0.1):
+    mse = metrics.mse(pred, target)
+    tv = metrics.total_variation(txm)
+
+    return mse + tv_factor * tv
+
+
+def loss_logger(loss, *args):
+    wandb.log(
+        dict(
+            loss=loss,
+        )
     )
 
-    return base_optimize(**{**def_opt_params, **opt_params})
 
-
-def optimize_unknown_processing(true_raw, target, operator, run_init={}):
+def optimize_unknown_processing(target, run_init={}):
     run = wandb.init(**run_init)
+    hyperparams = run.config
 
-    def dmp_metric(fn, a, b):
-        return fn(jnp.expand_dims(a, axis=2), jnp.expand_dims(b, axis=2)).item()
+    shape = target[0].shape
+    batch_shape = target.shape
 
-    def loss_logger(loss, params, pred, target):
-        mse_tm = dmp_metric(dmp.mse, params["image"], true_raw)
-        ssim_tm = dmp_metric(dmp.ssim, params["image"], true_raw)
-        psnr_tm = dmp_metric(dmp.psnr, params["image"], true_raw)
-        mse_fwd = dmp_metric(dmp.mse, pred, target)
-        ssim_fwd = dmp_metric(dmp.ssim, pred, target)
-        psnr_fwd = dmp_metric(dmp.psnr, pred, target)
-
-        run.log(
-            dict(
-                loss=loss,
-                mse_tm=mse_tm,
-                ssim_tm=ssim_tm,
-                psnr_tm=psnr_tm,
-                mse_fwd=mse_fwd,
-                ssim_fwd=ssim_fwd,
-                psnr_fwd=psnr_fwd,
-            )
-        )
-
-    # loss_logger = lambda loss, params, pred, target: run.log({"loss": loss})
-
-    run.use_artifact("transmission-map-raw:latest")
-    run.use_artifact("transmission-map-target:latest")
-
-    key = jax.random.PRNGKey(run.config["PRNGKey"])
+    key = jax.random.PRNGKey(hyperparams["PRNGKey"])
+    txm0 = jax.random.normal(key, shape=batch_shape)
     w0 = {
-        "image": jax.random.uniform(key, minval=1e-6, maxval=0.1, shape=target.shape),
         "window_center": jax.random.uniform(key, minval=0.1, maxval=0.9),
         "window_width": jax.random.uniform(key, minval=0.1, maxval=0.9),
         "low_sigma": jax.random.uniform(key, minval=0.1, maxval=min(target.shape) / 2),
@@ -90,78 +79,46 @@ def optimize_unknown_processing(true_raw, target, operator, run_init={}):
         "high_enhance_factor": jax.random.uniform(key, minval=0.1, maxval=3.0),
         "gamma": jax.random.uniform(key, minval=0.1, maxval=3.0),
     }
-    loss_fn = ops.build_loss(
-        ops.mse, ops.total_variation(run.config["total_variation"])
-    )
 
-    recovered, loss = run_optimization(
+    def unbatched_loss(*args):
+        return loss(*args, tv_factor=hyperparams["total_variation"])
+
+    def loss_fn(*args):
+        batched_loss = jax.vmap(unbatched_loss, in_axes=(0, None, 0, 0))
+        loss_val = batched_loss(*args)
+
+        return jnp.mean(loss_val)
+
+    batched_forward = jax.vmap(forward, in_axes=(0, None))
+
+    state, losses = base_optimize(
         target,
-        run.config,
-        operator=operator,
+        txm0,
+        w0,
         loss_fn=loss_fn,
+        forward_fn=batched_forward,
+        eps=hyperparams["eps"],
+        lr=hyperparams["lr"],
         loss_logger=loss_logger,
-        w0=w0,
+        n_steps=hyperparams["n_steps"],
     )
+    (txm, weights) = state
 
-    wandb.log(
-        {
-            "recovered_params": {
-                key: value for key, value in recovered.items() if key != "image"
-            }
-        }
-    )
-
-    normalize = ops.build_forward_fn(range_normalize)
-    rec_range_normal = normalize(recovered)
-    utils.log_image("recovered", rec_range_normal)
-
-    rec_processed = operator(recovered)
-    utils.log_image("recovered_processed", normalize({"image": rec_processed}))
-
-    range_normal_metrics = run_metrics(true_raw, target, rec_range_normal)
-    log_run_metrics(
-        run,
-        range_normal_metrics,
-        "summ",
-    )
-
-    run.log(
-        {
-            "mse": range_normal_metrics["mse_opt"],
-            "mse_diff": range_normal_metrics["mse_opt"]
-            - range_normal_metrics["mse_naive"],
-        }
-    )
-
-
-def setup_artifacts(raw_path: str, target_path: str, project=None):
-    with wandb.init(project=project, job_type="data-preparation") as run:
-        # Create artifacts for input images
-        raw_artifact = wandb.Artifact("transmission-map-raw", type="dataset")
-        _ = raw_artifact.add_file(raw_path)
-        run.log_artifact(raw_artifact)
-
-        target_artifact = wandb.Artifact("transmission-map-target", type="dataset")
-        _ = target_artifact.add_file(target_path)
-        un.log_artifact(target_artifact)
-
-        return raw_artifact.name, target_artifact.name
+    wandb.log({"recovered_params": weights})
+    # vnormalize = jax.vmap(ops.range_normalize, in_axes=(0,))
 
 
 if __name__ == "__main__":
-    project = "unsharp-mask-unknown-processing"
+    from chest_xray_sim.data.loader import load_chexpert
 
-    args = parser.parse_args()
-    true_raw = cv2.imread(args.raw, cv2.IMREAD_UNCHANGED)
-    true_raw = true_raw / 255.0
+    args = parser()
 
-    target = cv2.imread(args.target, cv2.IMREAD_UNCHANGED)
-    target = target / 255.0
+    chexpert_data = load_chexpert(args.root_dir, args.meta_path, args.img_dir, limit=30)
+    images = np.stack([d["image"] for d in chexpert_data])
 
-    MAX_DIM = 512
+    target = utils.preprocess_chexpert_batch(images, target_size=(512, 450))
 
-    target = utils.cap_resize(target, MAX_DIM)
-    true_raw = utils.cap_resize(true_raw, MAX_DIM)
+    project = "batch-unsharp-mask"
 
     wandb.login()
 
@@ -189,16 +146,6 @@ if __name__ == "__main__":
             "eps": {"value": 1e-6},
         },
     }
-    operator = ops.build_forward_fn(
-        negative_log,
-        unsharp_masking("low_"),
-        unsharp_masking("high_"),
-        windowing,
-        range_normalize,
-    )
-    raw_artifact, target_artifact = setup_artifacts(
-        args.raw, args.target, project=project
-    )
 
     sweep_id = wandb.sweep(
         sweep=sweep_config,
@@ -206,8 +153,6 @@ if __name__ == "__main__":
     )
     wandb.agent(
         sweep_id,
-        function=lambda: optimize_unknown_processing(
-            true_raw, target, operator=operator, run_init=run_init
-        ),
+        function=lambda: optimize_unknown_processing(target, run_init=run_init),
         count=10,
     )

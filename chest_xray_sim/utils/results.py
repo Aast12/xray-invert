@@ -13,8 +13,8 @@ def run_metrics(
     sqerr_opt, sqerr_opt_flat = sqerr(recovered_raw, true_raw)
 
     return {
-        "sqerr_naive": jnp.histogram(sqerr_naive_flat, bins=100, range=(0, 1)),
-        "sqerr_opt": jnp.histogram(sqerr_opt_flat, bins=100, range=(0, 1)),
+        # "sqerr_naive": jnp.histogram(sqerr_naive_flat, bins=100, range=(0, 1)),
+        # "sqerr_opt": jnp.histogram(sqerr_opt_flat, bins=100, range=(0, 1)),
         "mse_naive": jnp.mean(sqerr_naive),
         "mse_opt": jnp.mean(sqerr_opt),
         "ssim_naive": ssim(naive, true_raw),
