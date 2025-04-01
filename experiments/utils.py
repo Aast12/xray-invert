@@ -1,20 +1,33 @@
 import argparse
 import functools
 
+import cv2
 import jax
 import numpy as np
+
 import wandb
-
 from chest_xray_sim.inverse.core import base_optimize
-
+from jax.typing import ArrayLike
+from cv2.typing import MatLike
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
+
+
+def cap_resize(img: MatLike, max_dim: int) -> MatLike:
+    og_rows, og_cols = int(img.shape[0]), int(img.shape[1])
+    og_ratio = min(og_rows, og_cols) / max(og_rows, og_cols)
+
+    low_dim = int(og_ratio * max_dim)
+    # reverse order (cols, rows) to feed cv2.resize
+    new_shape = (low_dim, max_dim) if og_rows > og_cols else (max_dim, low_dim)
+
+    return cv2.resize(img, new_shape)
 
 
 def experiment_args(**arguments):
     parser = argparse.ArgumentParser()
     for arg, default in arguments.items():
-        parser.add_argument(f'--{arg}', type=str, default=default)
+        parser.add_argument(f"--{arg}", type=str, default=default)
 
     def parse_args():
         return parser.parse_args()
@@ -29,13 +42,12 @@ def log_image(label, img, bits=8):
 
 
 def log_run_metrics(run, metrics, prefix):
-    prefixed_metrics = {f"{prefix}{key}": value for key, value in metrics.items()}
+    prefixed_metrics = {f"{prefix}{key}": value for key, value in metrics.items()
     for key, value in prefixed_metrics.items():
         run.summary[key] = value
 
 
 def random_initialization(key, **params):
-
     state = {
         k: jax.random.uniform(
             key, minval=v["min"], maxval=v["min"], shape=v.get("shape", ())
@@ -46,13 +58,11 @@ def random_initialization(key, **params):
     return state
 
 
-def dict_merge(*dicts):
+def dict_merge(*dicts: dict[any, any]):
     return functools.reduce(lambda a, b: {**a, **b}, dicts)
 
 
 def build_optim_runner(w0_builder, operator, loss_fn, **opt_params_high):
-
-
     def run_optimization(target, hyperparams, **opt_params):
         w0 = w0_builder(hyperparams)
 
@@ -65,20 +75,21 @@ def build_optim_runner(w0_builder, operator, loss_fn, **opt_params_high):
             loss_fn=loss_fn,
         )
 
-
         operator_params = operator.keys
         missing_params = set(operator_params) - set(w0.keys())
-        assert (
-            len(missing_params) == 0
-        ), "Initial weights missing for operator params: " + ", ".join(missing_params)
-
+        assert len(missing_params) == 0, (
+            "Initial weights missing for operator params: " + ", ".join(missing_params)
+        )
 
         opt_params = dict_merge(def_opt_params, opt_params_high, opt_params)
 
-        print ('Optimization params: ', {k:v for k,v in opt_params.items() if k not in ['target', 'w0']})
-        print('initial weights:', {k:v for k,v in w0.items() if k not in ['image']})
-        print('image stats:', w0['image'].mean())
-        print('targetstats:', target.mean())
+        print(
+            "Optimization params: ",
+            {k: v for k, v in opt_params.items() if k not in ["target", "w0"]},
+        )
+        print("initial weights:", {k: v for k, v in w0.items() if k not in ["image"]})
+        print("image stats:", w0["image"].mean())
+        print("targetstats:", target.mean())
         return base_optimize(**opt_params)
 
     return run_optimization
@@ -94,7 +105,6 @@ def get_sweep_step(
     run_config={},
     **opt_params,
 ):
-
     def optimize():
         with wandb.init(**run_config) as run:
             forward_op = forward_op_builder(run.config)
@@ -108,7 +118,6 @@ def get_sweep_step(
                 loss_fn,
                 **opt_params,
             )
-
 
             recovered, _ = run_optimization(target, run.config)
             # recovere

@@ -1,9 +1,12 @@
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from .metrics import naive_inversion, sqerr, ssim
+from jax.typing import ArrayLike, Array
 
 
-def run_metrics(true_raw, true_processed, recovered_raw):
+def run_metrics(
+    true_raw: ArrayLike, true_processed: ArrayLike, recovered_raw: ArrayLike
+) -> dict[str, Array | tuple[Array, Array]]:
     naive = naive_inversion(true_processed)
 
     sqerr_naive, sqerr_naive_flat = sqerr(naive, true_raw)

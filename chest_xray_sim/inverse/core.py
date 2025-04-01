@@ -39,6 +39,9 @@ def base_optimize(
         pred = forward_fn(params)
         loss = loss_fn(params, pred, target)
 
+        if loss_logger:
+            loss_logger(loss.item(), params, pred, target)
+
         assert (
             pred.shape == target.shape
         ), f"Shapes do not match: {pred.shape} != {target.shape}"
@@ -83,8 +86,8 @@ def base_optimize(
         loss, _, params, opt_state = update(optimizer, params, opt_state, target)
         losses.append(loss)
 
-        if loss_logger is not None:
-            loss_logger(loss)
+        # if loss_logger is not None:
+        #     loss_logger(loss)
 
         if jnp.isnan(loss):
             params, loss = prev_state
