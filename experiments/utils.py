@@ -1,22 +1,18 @@
 import argparse
 import functools
+from typing import Any
 
 import cv2
 import jax
 import jax.numpy as jnp
 import numpy as np
+from cv2.typing import MatLike
+from skimage.transform import resize
 
 import wandb
 from chest_xray_sim.inverse.core import base_optimize
-from jax.typing import ArrayLike
-from cv2.typing import MatLike
-from typing import Any
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
-
-import numpy as np
-from skimage.transform import resize
-
 
 def center_crop_with_aspect_ratio(image, target_size=(512, 512)):
     """

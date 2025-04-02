@@ -1,12 +1,16 @@
 import jax
 import jax.numpy as jnp
 import optax
+from jax.typing import ArrayLike
+
+
+WeightsT = dict[str, ArrayLike]
 
 
 def base_optimize(
-    target,
-    txm0,
-    w0,
+    target: ArrayLike,
+    txm0: ArrayLike,
+    w0: WeightsT,
     loss_fn,
     forward_fn,
     optimizer_builder=optax.adam,
@@ -14,7 +18,7 @@ def base_optimize(
     n_steps=500,
     loss_logger=None,
     eps=1e-8,
-):
+) -> tuple[tuple[ArrayLike, WeightsT], list[float]]:
     def loss_call(weights, tx_maps, target):
         pred = forward_fn(tx_maps, weights)
         loss = loss_fn(tx_maps, weights, pred, target)
@@ -31,6 +35,13 @@ def base_optimize(
     optimizer = optimizer_builder(learning_rate=lr)
 
     state = (txm0, w0)
+
+    print("txm0 ", txm0.shape)
+    print("txm0_0", txm0[0].shape)
+    print("w0", w0)
+    print("target", target.shape)
+    print("target0", target[0].shape)
+
     opt_state = optimizer.init(state)
 
     losses = []
@@ -41,13 +52,17 @@ def base_optimize(
         tx_maps, weights = state
 
         loss_value_and_grad = jax.value_and_grad(loss_call, argnums=(0, 1))
-        loss, grads = loss_value_and_grad(weights, tx_maps, target)
+        loss, (weight_grads, tx_grads) = loss_value_and_grad(weights, tx_maps, target)
+        grads = (tx_grads, weight_grads)
 
         updates, new_opt_state = optimizer.update(grads, opt_state)
         updates_txm, updates_weights = updates
 
+        txm_new_state = optax.apply_updates(tx_maps, updates_txm)
+        txm_new_state = optax.projections.projection_box(txm_new_state, 0.0, 1.0)
+
         new_state = (
-            optax.apply_updates(tx_maps, updates_txm),
+            txm_new_state,
             optax.apply_updates(weights, updates_weights),
         )
 

@@ -1,3 +1,4 @@
+import os
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -17,7 +18,7 @@ import utils
 import itertools
 import argparse
 import dm_pix as dmp
-from utils import experiment_args
+from utils import experiment_args, BIT_DTYPES
 
 # parser = argparse.ArgumentParser()
 # _ = parser.add_argument(
@@ -25,7 +26,14 @@ from utils import experiment_args
 # )
 # _ = parser.add_argument("--target", type=str, default="data/conventional_processed.tif")
 #
-parser = experiment_args(root_dir=None, meta_path=None, img_dir=None)
+
+print("env:", os.environ)
+parser = experiment_args(
+    root_dir=os.environ.get("CHEXPERT_ROOT"),
+    meta_path=os.environ.get("META_PATH"),
+    img_dir=os.environ.get("IMAGE_PATH"),
+    save_dir=os.environ.get("OUTPUT_DIR"),
+)
 
 
 def log_run_metrics(run, metrics, prefix):
@@ -36,12 +44,13 @@ def log_run_metrics(run, metrics, prefix):
 
 def forward(image, weights):
     x = ops.negative_log(image)
-    x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
-    x = ops.unsharp_masking(x, weights["high_sigma"], weights["high_enhance_factor"])
+    # x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
+    # x = ops.unsharp_masking(x, weights["high_sigma"], weights["high_enhance_factor"])
     x = ops.windowing(
         x, weights["window_center"], weights["window_width"], weights["gamma"]
     )
     x = ops.range_normalize(x)
+    # x = ops.clipping(x)
 
     return x
 
@@ -61,7 +70,12 @@ def loss_logger(loss, *args):
     )
 
 
-def optimize_unknown_processing(target, run_init={}):
+def save_image(img, path: str, bits=8):
+    x = ops.range_normalize(img)
+    cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
+
+
+def optimize_unknown_processing(target, run_init={}, save_dir=None, target_meta=None):
     run = wandb.init(**run_init)
     hyperparams = run.config
 
@@ -69,7 +83,18 @@ def optimize_unknown_processing(target, run_init={}):
     batch_shape = target.shape
 
     key = jax.random.PRNGKey(hyperparams["PRNGKey"])
-    txm0 = jax.random.normal(key, shape=batch_shape)
+    txm0 = None
+
+    txm_min, txm_max = hyperparams["tm_init_range"]
+    if hyperparams["tm_distribution"] == "normal":
+        txm0 = jax.random.normal(key, shape=batch_shape)
+        ratio = (txm0 - txm0.min(axis=0)) / (txm0.max(axis=0) - txm0.min(axis=0))
+        txm0 = ratio * (txm_max - txm_min) + txm_min
+    else:
+        txm0 = jax.random.uniform(
+            key, minval=txm_min, maxval=txm_max, shape=batch_shape
+        )
+
     w0 = {
         "window_center": jax.random.uniform(key, minval=0.1, maxval=0.9),
         "window_width": jax.random.uniform(key, minval=0.1, maxval=0.9),
@@ -102,10 +127,23 @@ def optimize_unknown_processing(target, run_init={}):
         loss_logger=loss_logger,
         n_steps=hyperparams["n_steps"],
     )
+
     (txm, weights) = state
 
     wandb.log({"recovered_params": weights})
-    # vnormalize = jax.vmap(ops.range_normalize, in_axes=(0,))
+
+    if save_dir is not None and target_meta is not None:
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+
+        run_save_path = os.path.join(save_dir, run.id)
+        os.mkdir(run_save_path)
+
+        labels = [f"{d['patient_id']}_{d['study']}.tif" for d in target_meta]
+        labels = [os.path.join(run_save_path, lb) for lb in labels]
+
+        for img, label in zip(txm, labels):
+            save_image(img, label)
 
 
 if __name__ == "__main__":
@@ -113,10 +151,13 @@ if __name__ == "__main__":
 
     args = parser()
 
-    chexpert_data = load_chexpert(args.root_dir, args.meta_path, args.img_dir, limit=30)
-    images = np.stack([d["image"] for d in chexpert_data])
+    print("using args:", args)
 
-    target = utils.preprocess_chexpert_batch(images, target_size=(512, 450))
+    chexpert_data = load_chexpert(args.root_dir, args.meta_path, args.img_dir, limit=20)
+    images = [d["image"] for d in chexpert_data]
+    image_meta = [{k: v for k, v in d.items() if k != "image"} for d in chexpert_data]
+
+    target = np.stack(utils.preprocess_chexpert_batch(images, target_size=(512, 450)))
 
     project = "batch-unsharp-mask"
 
@@ -136,10 +177,18 @@ if __name__ == "__main__":
             "n_steps": {"values": [500, 700, 1200]},
             "total_variation": {"values": [0.0, 0.1, 0.01, 0.001]},
             "PRNGKey": {"values": [0, 42]},
+            "tm_distribution": {"values": ["uniform", "normal"]},
+            "tm_init_range": {
+                "values": [
+                    (1e-6, 0.1),
+                    (1e-6, 0.5),
+                    (1e-6, 1.0),
+                    (0.5, 1.0),
+                ]
+            },
             # Fixed/metadata parameters
             "loss": {"value": "MSE + TV"},
             "initialization": {"value": "uniform random"},
-            "image_init_range": {"value": [1e-6, 0.1]},
             "window_center_init_range": {"value": [0.1, 0.9]},
             "window_width_init_range": {"value": [0.1, 0.9]},
             "gamma_init_range": {"value": [0.1, 3.0]},
@@ -153,6 +202,8 @@ if __name__ == "__main__":
     )
     wandb.agent(
         sweep_id,
-        function=lambda: optimize_unknown_processing(target, run_init=run_init),
+        function=lambda: optimize_unknown_processing(
+            target, run_init=run_init, target_meta=image_meta, save_dir=args.save_dir
+        ),
         count=10,
     )
