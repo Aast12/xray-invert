@@ -1,14 +1,13 @@
 import os
 
 import cv2
-import dm_pix as dmp
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import utils
 from jaxtyping import Array, Float
 from utils import BIT_DTYPES, experiment_args
-import optax
 
 import chest_xray_sim.inverse.metrics as metrics
 import chest_xray_sim.inverse.operators as ops
@@ -50,6 +49,25 @@ def loss(txm, weights, pred, target, tv_factor=0.1):
     # jax.debug.print("single tv={x}", x=tv)
 
     return mse + tv_factor * tv
+
+
+def projection(txm_state, weights_state):
+    new_txm_state = optax.projections.projection_hypercube(txm_state)
+    new_weights_state = optax.projections.projection_non_negative(weights_state)
+    new_weights_state["low_sigma"] = optax.projections.projection_box(
+        weights_state["low_sigma"], 0.1, 10
+    )
+    new_weights_state["high_sigma"] = optax.projections.projection_box(
+        weights_state["high_sigma"], 0.1, 10
+    )
+    new_weights_state["low_enhance_factor"] = optax.projections.projection_box(
+        new_weights_state["low_enhance_factor"], 0.1, 1.0
+    )
+    new_weights_state["high_enhance_factor"] = optax.projections.projection_box(
+        new_weights_state["high_enhance_factor"], 0.0, 1.0
+    )
+
+    return new_txm_state, new_weights_state
 
 
 def loss_logger(loss, *args):
@@ -117,6 +135,7 @@ def optimize_unknown_processing(
         w0,
         loss_fn=loss_fn,
         forward_fn=batched_forward,
+        project_fn=projection,
         eps=hyperparams["eps"],
         lr=hyperparams["lr"],
         loss_logger=loss_logger,
@@ -162,7 +181,7 @@ if __name__ == "__main__":
     images = [d["image"] for d in chexpert_data]
     image_meta = [{k: v for k, v in d.items() if k != "image"} for d in chexpert_data]
 
-    target = np.stack(utils.preprocess_chexpert_batch(images, target_size=(512, 450)))  # noqa
+    target = np.stack(utils.preprocess_chexpert_batch(images, target_size=(512, 450)))
     print("target shape:", target.shape)
 
     project = "batch-unsharp-mask"

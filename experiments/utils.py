@@ -7,12 +7,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from cv2.typing import MatLike
+from jaxtyping import Float, Array
 from skimage.transform import resize
 
 import wandb
 from chest_xray_sim.inverse.core import base_optimize
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
+
 
 def center_crop_with_aspect_ratio(image, target_size=(512, 512)):
     """
@@ -68,7 +70,9 @@ def center_crop_with_aspect_ratio(image, target_size=(512, 512)):
     return resized.astype(image.dtype)
 
 
-def preprocess_chexpert_batch(images, target_size=(512, 512)):
+def preprocess_chexpert_batch(
+    images, target_size=(512, 512)
+) -> Float[Array, "batch rows cols"]:
     """
     Preprocess a batch of CheXpert images with NumPy.
 

@@ -1,11 +1,11 @@
 import jax
-from functools import partial
 import jax.numpy as jnp
 from dm_pix import gaussian_blur
+from jaxtyping import Array, Float
 
 
 # @partial(jax.jit, static_argnums=(1,))
-def negative_log(image, eps=1e-6):
+def negative_log(image: Float[Array, "rows cols"], eps=1e-6):
     return -jnp.log(jnp.maximum(image, eps))
 
 

@@ -1,24 +1,34 @@
 import jax
 import jax.numpy as jnp
 import optax
-from jax.typing import ArrayLike
+from jaxtyping import Array, Float, PyTree
+from typing import Callable, Optional, Union
 
 
-WeightsT = dict[str, ArrayLike]
+WeightsT = PyTree
+BatchT = Float[Array, "batch rows cols"]
+LossFnT = Callable[[BatchT, WeightsT, BatchT, BatchT], Float[Array, ""]]
+ForwardFnT = Callable[[BatchT, WeightsT], BatchT]
+ProjectFnT = Callable[[PyTree, WeightsT], tuple[PyTree, WeightsT]]
+
+OptimizationRetT = Union[
+    tuple[tuple[PyTree, PyTree], list[float]], tuple[None, list[float]]
+]
 
 
 def base_optimize(
-    target: ArrayLike,
-    txm0: ArrayLike,
+    target: BatchT,
+    txm0: BatchT,
     w0: WeightsT,
-    loss_fn,
-    forward_fn,
+    loss_fn: LossFnT,
+    forward_fn: ForwardFnT,
+    project_fn: ProjectFnT | None = None,
     optimizer_builder=optax.adam,
     lr=0.001,
     n_steps=500,
     loss_logger=None,
     eps=1e-8,
-) -> tuple[tuple[ArrayLike, WeightsT], list[float]]:
+) -> OptimizationRetT:
     def loss_call(weights, tx_maps, target):
         pred = forward_fn(tx_maps, weights)
         loss = loss_fn(tx_maps, weights, pred, target)
@@ -35,12 +45,6 @@ def base_optimize(
     optimizer = optimizer_builder(learning_rate=lr)
 
     state = (txm0, w0)
-
-    print("txm0 ", txm0.shape)
-    print("txm0_0", txm0[0].shape)
-    print("w0", w0)
-    print("target", target.shape)
-    print("target0", target[0].shape)
 
     opt_state = optimizer.init(state)
 
@@ -59,12 +63,11 @@ def base_optimize(
         updates_txm, updates_weights = updates
 
         txm_new_state = optax.apply_updates(tx_maps, updates_txm)
-        txm_new_state = optax.projections.projection_box(txm_new_state, 0.0, 1.0)
+        weights_new_state = optax.apply_updates(weights, updates_weights)
+        new_state = (txm_new_state, weights_new_state)
 
-        new_state = (
-            txm_new_state,
-            optax.apply_updates(weights, updates_weights),
-        )
+        if project_fn:
+            new_state = project_fn(txm_new_state, weights_new_state)
 
         if jnp.isnan(loss):
             new_state, new_opt_state = original_state
@@ -88,5 +91,8 @@ def base_optimize(
             print(f"\nStep {step}, Loss: {loss:.6f}")
 
         prev_state = (state, loss)
+
+    if state is None:
+        return None, losses
 
     return state, losses

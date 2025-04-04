@@ -27,3 +27,6 @@ packages = ['chest_xray_sim']
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
+
+[tool.ruff.lint]
+ignore = ["F722"]
