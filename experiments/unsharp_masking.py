@@ -3,6 +3,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import cv2
+from chest_xray_sim.data.loader import ChexpertMeta
 from chest_xray_sim.inverse.operators import (
     negative_log,
     unsharp_masking,
@@ -44,20 +45,22 @@ def log_run_metrics(run, metrics, prefix):
 
 def forward(image, weights):
     x = ops.negative_log(image)
-    # x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
-    # x = ops.unsharp_masking(x, weights["high_sigma"], weights["high_enhance_factor"])
+    x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
+    x = ops.unsharp_masking(x, weights["high_sigma"], weights["high_enhance_factor"])
     x = ops.windowing(
         x, weights["window_center"], weights["window_width"], weights["gamma"]
     )
     x = ops.range_normalize(x)
-    # x = ops.clipping(x)
+    x = ops.clipping(x)
 
     return x
 
 
 def loss(txm, weights, pred, target, tv_factor=0.1):
     mse = metrics.mse(pred, target)
+    # jax.debug.print("single mse={x}", x=mse)
     tv = metrics.total_variation(txm)
+    # jax.debug.print("single tv={x}", x=tv)
 
     return mse + tv_factor * tv
 
@@ -98,11 +101,11 @@ def optimize_unknown_processing(target, run_init={}, save_dir=None, target_meta=
     w0 = {
         "window_center": jax.random.uniform(key, minval=0.1, maxval=0.9),
         "window_width": jax.random.uniform(key, minval=0.1, maxval=0.9),
+        "gamma": jax.random.uniform(key, minval=0.1, maxval=3.0),
         "low_sigma": jax.random.uniform(key, minval=0.1, maxval=min(target.shape) / 2),
         "low_enhance_factor": jax.random.uniform(key, minval=0.1, maxval=3.0),
         "high_sigma": jax.random.uniform(key, minval=0.1, maxval=min(target.shape)),
         "high_enhance_factor": jax.random.uniform(key, minval=0.1, maxval=3.0),
-        "gamma": jax.random.uniform(key, minval=0.1, maxval=3.0),
     }
 
     def unbatched_loss(*args):
@@ -111,6 +114,7 @@ def optimize_unknown_processing(target, run_init={}, save_dir=None, target_meta=
     def loss_fn(*args):
         batched_loss = jax.vmap(unbatched_loss, in_axes=(0, None, 0, 0))
         loss_val = batched_loss(*args)
+        # jax.debug.print("batch loss={x}", x=loss_val.shape)
 
         return jnp.mean(loss_val)
 
@@ -128,6 +132,10 @@ def optimize_unknown_processing(target, run_init={}, save_dir=None, target_meta=
         n_steps=hyperparams["n_steps"],
     )
 
+    if state is None:
+        print("run failed")
+        return
+
     (txm, weights) = state
 
     wandb.log({"recovered_params": weights})
@@ -144,6 +152,10 @@ def optimize_unknown_processing(target, run_init={}, save_dir=None, target_meta=
 
         for img, label in zip(txm, labels):
             save_image(img, label)
+            save_image(
+                ops.range_normalize(forward(img, weights)),
+                label.replace(".tif", "_proc.tif"),
+            )
 
 
 if __name__ == "__main__":
@@ -153,11 +165,32 @@ if __name__ == "__main__":
 
     print("using args:", args)
 
-    chexpert_data = load_chexpert(args.root_dir, args.meta_path, args.img_dir, limit=20)
+    chexpert_data: list[ChexpertMeta] = load_chexpert(
+        args.root_dir, args.meta_path, args.img_dir, limit=20
+    )
     images = [d["image"] for d in chexpert_data]
     image_meta = [{k: v for k, v in d.items() if k != "image"} for d in chexpert_data]
 
+    # path = "/Volumes/T7/projs/thesis/data/conventional_processed.tif"
+    # images = [
+    #     cv2.imread(
+    #         path,
+    #         cv2.IMREAD_UNCHANGED,
+    #     )
+    #     / 255.0
+    # ]
+    # image_meta: list[ChexpertMeta] = [
+    #     {
+    #         "image_label": "conventional_transmissionmap",
+    #         "image_path": path,
+    #         "patient_id": "unknown",
+    #         "study": "",
+    #         "image": np.array([]),
+    #     }
+    # ]
+
     target = np.stack(utils.preprocess_chexpert_batch(images, target_size=(512, 450)))
+    print("target shape:", target.shape)
 
     project = "batch-unsharp-mask"
 
@@ -205,5 +238,5 @@ if __name__ == "__main__":
         function=lambda: optimize_unknown_processing(
             target, run_init=run_init, target_meta=image_meta, save_dir=args.save_dir
         ),
-        count=10,
+        count=100,
     )

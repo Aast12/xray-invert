@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from dm_pix import gaussian_blur
 
 
-@partial(jax.jit, static_argnums=(1,))
+# @partial(jax.jit, static_argnums=(1,))
 def negative_log(image, eps=1e-6):
     return -jnp.log(jnp.maximum(image, eps))
 
@@ -25,18 +25,18 @@ def unsharp_masking(image, sigma, enhance_factor):
     return x.squeeze()
 
 
-@jax.jit
+# @jax.jit
 def clipping(image):
     return jnp.clip(image, 0.0, 1.0)
 
 
-@jax.jit
+# @jax.jit
 def range_normalize(image):
     x = image
     return (x - x.min()) / (x.max() - x.min())
 
 
-@jax.jit
+# @jax.jit
 def max_normalize(image):
     x = image
     return x / x.max()
