@@ -12,9 +12,29 @@ from skimage.transform import resize
 
 import wandb
 from chest_xray_sim.inverse.core import base_optimize
+import chest_xray_sim.inverse.operators as ops
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
 
+
+def get_batch_mean_loss(unbtached_loss, in_axes=(0, None, 0, 0), **vmap_args):
+    def loss_fn(*args):
+        batched_loss = jax.vmap(unbatched_loss, in_axes=(0, None, 0, 0), **vmap_args)
+        loss_val = batched_loss(*args)
+        return jnp.mean(loss_val)
+
+    return loss_fn
+
+def get_batch_fwd(forward, in_axes=(0, None), **vmap_args):
+    return jax.vmap(forward, in_axes=in_axes, **vmap_args)
+
+
+def basic_loss_logger(loss, *args):
+    wandb.log(
+        dict(
+            loss=loss,
+        )
+    )
 
 def center_crop_with_aspect_ratio(image, target_size=(512, 512)):
     """
@@ -111,6 +131,10 @@ def experiment_args(**arguments):
 
     return parse_args
 
+
+def save_image(img, path: str, bits: int=8):
+    x = ops.range_normalize(img)
+    cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
 
 def log_image(label, img, bits=8):
     rng = 2**bits - 1

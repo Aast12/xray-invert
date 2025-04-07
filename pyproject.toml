@@ -27,6 +27,14 @@ packages = ['chest_xray_sim']
 
 [tool.basedpyright]
 typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
 
 [tool.ruff.lint]
 ignore = ["F722"]
+
+

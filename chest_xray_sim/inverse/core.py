@@ -24,6 +24,7 @@ def base_optimize(
     forward_fn: ForwardFnT,
     project_fn: ProjectFnT | None = None,
     optimizer_builder=optax.adam,
+    constant_weights=False,
     lr=0.001,
     n_steps=500,
     loss_logger=None,
@@ -55,6 +56,7 @@ def base_optimize(
         original_state = (state, opt_state)
         tx_maps, weights = state
 
+
         loss_value_and_grad = jax.value_and_grad(loss_call, argnums=(0, 1))
         loss, (weight_grads, tx_grads) = loss_value_and_grad(weights, tx_maps, target)
         grads = (tx_grads, weight_grads)
@@ -63,9 +65,11 @@ def base_optimize(
         updates_txm, updates_weights = updates
 
         txm_new_state = optax.apply_updates(tx_maps, updates_txm)
-        weights_new_state = optax.apply_updates(weights, updates_weights)
-        new_state = (txm_new_state, weights_new_state)
+        weights_new_state = weights
+        if not constant_weights:
+            weights_new_state = optax.apply_updates(weights, updates_weights)
 
+        new_state = (txm_new_state, weights_new_state)
         if project_fn:
             new_state = project_fn(txm_new_state, weights_new_state)
 

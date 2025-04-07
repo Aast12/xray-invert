@@ -5,9 +5,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import utils
 from jaxtyping import Array, Float
-from utils import BIT_DTYPES, experiment_args
+import utils
+from utils import (
+    BIT_DTYPES,
+    experiment_args,
+    save_image,
+    basic_loss_logger as loss_logger,
+)
 
 import chest_xray_sim.inverse.metrics as metrics
 import chest_xray_sim.inverse.operators as ops
@@ -21,12 +26,6 @@ parser = experiment_args(
     img_dir=os.environ.get("IMAGE_PATH"),
     save_dir=os.environ.get("OUTPUT_DIR"),
 )
-
-
-def log_run_metrics(run, metrics, prefix):
-    prefixed_metrics = {f"{prefix}_{key}": value for key, value in metrics.items()}
-    for key, value in prefixed_metrics.items():
-        run.summary[key] = value
 
 
 def forward(image, weights):
@@ -44,9 +43,7 @@ def forward(image, weights):
 
 def loss(txm, weights, pred, target, tv_factor=0.1):
     mse = metrics.mse(pred, target)
-    # jax.debug.print("single mse={x}", x=mse)
     tv = metrics.total_variation(txm)
-    # jax.debug.print("single tv={x}", x=tv)
 
     return mse + tv_factor * tv
 
@@ -68,19 +65,6 @@ def projection(txm_state, weights_state):
     )
 
     return new_txm_state, new_weights_state
-
-
-def loss_logger(loss, *args):
-    wandb.log(
-        dict(
-            loss=loss,
-        )
-    )
-
-
-def save_image(img, path: str, bits=8):
-    x = ops.range_normalize(img)
-    cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
 
 
 def optimize_unknown_processing(
@@ -117,24 +101,15 @@ def optimize_unknown_processing(
         "high_enhance_factor": jax.random.uniform(key, minval=0.1, maxval=3.0),
     }
 
-    def unbatched_loss(*args):
-        return loss(*args, tv_factor=hyperparams["total_variation"])
-
     def loss_fn(*args):
-        batched_loss = jax.vmap(unbatched_loss, in_axes=(0, None, 0, 0))
-        loss_val = batched_loss(*args)
-        # jax.debug.print("batch loss={x}", x=loss_val.shape)
-
-        return jnp.mean(loss_val)
-
-    batched_forward = jax.vmap(forward, in_axes=(0, None))
+        return loss(*args, tv_factor=hyperparams["total_variation"])
 
     state, _ = base_optimize(
         target,
         txm0,
         w0,
-        loss_fn=loss_fn,
-        forward_fn=batched_forward,
+        loss_fn=utils.get_batch_mean_loss(loss_fn),
+        forward_fn=utils.get_batch_fwd(forward),
         project_fn=projection,
         eps=hyperparams["eps"],
         lr=hyperparams["lr"],
@@ -171,30 +146,36 @@ def optimize_unknown_processing(
 if __name__ == "__main__":
     from chest_xray_sim.data.loader import load_chexpert
 
+    wandb.login()
+
+    PROJECT = "batch-unsharp-mask"
+    SWEEP_NAME = "unknown-transform-sweep-v2"
+    FWD_DESC = (
+        "negative log, 2-layer unsharp masking, windowing and range normalization"
+    )
+
+    TARGET_SIZE = (512, 450)
+    SWEEP_COUNT = 100
+
     args = parser()
 
     print("using args:", args)
 
+    # input data
     chexpert_data: list[ChexpertMeta] = load_chexpert(
         args.root_dir, args.meta_path, args.img_dir, limit=20
     )
     images = [d["image"] for d in chexpert_data]
     image_meta = [{k: v for k, v in d.items() if k != "image"} for d in chexpert_data]
 
-    target = np.stack(utils.preprocess_chexpert_batch(images, target_size=(512, 450)))
-    print("target shape:", target.shape)
-
-    project = "batch-unsharp-mask"
-
-    wandb.login()
-
+    target = np.stack(utils.preprocess_chexpert_batch(images, target_size=TARGET_SIZE))
     run_init = dict(
-        project=project,
-        notes="transformation: negative log, 2-layer unsharp masking, windowing and range normalization",
-        tags=[f"max_dim={512}"],
+        project=PROJECT,
+        notes=f"transformation: {FWD_DESC}",
+        tags=[f"dims={TARGET_SIZE}"],
     )
     sweep_config = {
-        "name": "unknown-transform-sweep-v2",
+        "name": SWEEP_NAME,
         "method": "bayes",
         "metric": {"name": "mse", "goal": "minimize"},
         "parameters": {
@@ -223,12 +204,12 @@ if __name__ == "__main__":
 
     sweep_id = wandb.sweep(
         sweep=sweep_config,
-        project=project,
+        project=PROJECT,
     )
     wandb.agent(
         sweep_id,
         function=lambda: optimize_unknown_processing(
             target, run_init=run_init, target_meta=image_meta, save_dir=args.save_dir
         ),
-        count=100,
+        count=SWEEP_COUNT,
     )
