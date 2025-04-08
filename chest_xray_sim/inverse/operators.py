@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import dm_pix as dmp
 from dm_pix import gaussian_blur
 from jaxtyping import Array, Float
 
@@ -19,9 +20,13 @@ def windowing(image, window_center, window_width, gamma):
 
 def unsharp_masking(image, sigma, enhance_factor):
     x = jnp.expand_dims(image, axis=2)
-    kernel_size = int(4 * sigma) + 1
+    kernel_size = 2 * sigma
     blurred = gaussian_blur(x, sigma, kernel_size, padding="SAME")
-    x = x + enhance_factor * (x - blurred)
+
+    # blurred = dmp.pad_to_size(blurred, x.shape[0], x.shape[1], mode="reflect")
+
+    x = (x - enhance_factor * blurred) / (1.0 - enhance_factor)
+
     return x.squeeze()
 
 

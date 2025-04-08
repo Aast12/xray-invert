@@ -21,9 +21,8 @@ from chest_xray_sim.data.loader import ChexpertMeta
 from chest_xray_sim.inverse.core import base_optimize
 
 parser = experiment_args(
-    root_dir=os.environ.get("CHEXPERT_ROOT"),
-    meta_path=os.environ.get("META_PATH"),
-    img_dir=os.environ.get("IMAGE_PATH"),
+    tm_path=os.environ.get('INPUT_PATH'),
+    target_path=os.environ.get('TARGET_PATH'),
     save_dir=os.environ.get("OUTPUT_DIR"),
 )
 
@@ -40,6 +39,7 @@ def forward(image, weights):
 
     return x
 
+
 def loss(txm, weights, pred, target, tv_factor=0.1):
     mse = metrics.mse(pred, target)
     tv = metrics.total_variation(txm)
@@ -51,7 +51,7 @@ def projection(txm_state, weights_state):
     new_txm_state = optax.projections.projection_hypercube(txm_state)
     new_weights_state = optax.projections.projection_non_negative(weights_state)
     new_weights_state["low_sigma"] = optax.projections.projection_box(
-        weights_state["low_sigma"], 0.1, 10
+        weights_state["low_sigma"], 1.0, 10.0
     )
     new_weights_state["low_enhance_factor"] = optax.projections.projection_box(
         new_weights_state["low_enhance_factor"], 0.1, 1.0
@@ -64,7 +64,7 @@ def run_processing(
     target: Float[Array, "batch rows cols"],
     run_init={},
     save_dir: str | None = None,
-    target_meta: list[ChexpertMeta] | None = None,
+    image_labels = None
 ):
     run = wandb.init(**run_init)
     hyperparams = run.config
@@ -72,15 +72,14 @@ def run_processing(
 
     key = jax.random.PRNGKey(hyperparams["PRNGKey"])
     txm0 = utils.get_random(key, batch_shape, distribution=hyperparams["tm_init_range"])
+    # jax.debug.print('TXM0 mean= {m} ', m=txm0.mean())
 
     w0 = {
-        "low_sigma": 10.0,
-        "low_enhance_factor": 0.75,
-        "high_sigma": 0.1,
-        "high_enhance_factor": 0.0,
-        "window_center": 0.5,
-        "window_width": .8,
-        "gamma": 1.2
+        "window_center": jax.random.uniform(key, minval=0.1, maxval=0.9),
+        "window_width": jax.random.uniform(key, minval=0.1, maxval=0.9),
+        "gamma": jax.random.uniform(key, minval=0.1, maxval=3.0),
+        "low_sigma": jax.random.uniform(key, minval=1., maxval=10.0),
+        "low_enhance_factor": jax.random.uniform(key, minval=0.1, maxval=1.0),
     }
 
     def loss_fn(*args):
@@ -95,8 +94,7 @@ def run_processing(
         run=run,
         projection=projection,
         save_dir=save_dir,
-        constant_weights=True,
-        image_labels=[f"{d['patient_id']}_{d['study']}.tif" for d in target_meta] if target_meta else None
+        image_labels=image_labels
     )
 
 
@@ -105,8 +103,8 @@ if __name__ == "__main__":
 
     _ = wandb.login()
 
-    PROJECT = "batch-known-transform"
-    SWEEP_NAME = "fixed-unsharp"
+    PROJECT = "single-unknown-unsharp-mask"
+    SWEEP_NAME = "fixed-unsharp-operator"
     FWD_DESC = (
         "negative log, windowing, range normalization, unsharp masking, clipping"
     )
@@ -114,25 +112,24 @@ if __name__ == "__main__":
     TARGET_SIZE = (512, 450)
     SWEEP_COUNT = 100
 
-    TAGS = [f"dims={TARGET_SIZE}", *[f.strip() for f in FWD_DESC.split(',')], 'batch', 'unknown']
-
+    TAGS = [f"dims={TARGET_SIZE}", *[f.strip() for f in FWD_DESC.split(',')], 'single', 'unknown']
 
     args = parser()
 
     print("using args:", args)
 
     # input data
-    chexpert_data: list[ChexpertMeta] = load_chexpert(
-        args.root_dir, args.meta_path, args.img_dir, limit=20
-    )
-    images = [d["image"] for d in chexpert_data]
-    image_meta = [{k: v for k, v in d.items() if k != "image"} for d in chexpert_data]
+    images = [
+        cv2.imread(args.target_path, cv2.IMREAD_UNCHANGED) / 255.0
+    ]
+    image_labels = ['recovered.tif']
 
     target = np.stack(utils.preprocess_chexpert_batch(images, target_size=TARGET_SIZE))
+
     run_init = dict(
         project=PROJECT,
         notes=f"transformation: {FWD_DESC}",
-        tags=[f"dims={TARGET_SIZE}"],
+        tags=TAGS
     )
     sweep_config = {
         "name": SWEEP_NAME,
@@ -169,7 +166,7 @@ if __name__ == "__main__":
     wandb.agent(
         sweep_id,
         function=lambda: run_processing(
-            target, run_init=run_init, target_meta=image_meta, save_dir=args.save_dir
+            target, run_init=run_init, image_labels=image_labels, save_dir=args.save_dir
         ),
         count=SWEEP_COUNT,
     )

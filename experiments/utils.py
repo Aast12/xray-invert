@@ -1,6 +1,7 @@
 import argparse
 import functools
-from typing import Any
+import os
+from typing import Any, Literal
 
 import cv2
 import jax
@@ -17,13 +18,33 @@ import chest_xray_sim.inverse.operators as ops
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
 
 
-def get_batch_mean_loss(unbtached_loss, in_axes=(0, None, 0, 0), **vmap_args):
+def get_random(
+    key,
+    shape,
+    distribution: Literal["normal", "uniform"] = "uniform",
+    val_range=(0.0, 1.0),
+    axis: int | None = 0,
+):
+    arr = None
+    minval, maxval = val_range
+    if distribution == "normal":
+        arr = jax.random.normal(key, shape=shape)
+        ratio = (arr - arr.min(axis=axis)) / (arr.max(axis=axis) - arr.min(axis=axis))
+        arr = ratio * (maxval - minval) + minval
+    else:
+        arr = jax.random.uniform(key, minval=minval, maxval=maxval, shape=shape)
+
+    return arr
+
+
+def get_batch_mean_loss(unbatched_loss, in_axes=(0, None, 0, 0), **vmap_args):
     def loss_fn(*args):
-        batched_loss = jax.vmap(unbatched_loss, in_axes=(0, None, 0, 0), **vmap_args)
+        batched_loss = jax.vmap(unbatched_loss, in_axes=in_axes, **vmap_args)
         loss_val = batched_loss(*args)
         return jnp.mean(loss_val)
 
     return loss_fn
+
 
 def get_batch_fwd(forward, in_axes=(0, None), **vmap_args):
     return jax.vmap(forward, in_axes=in_axes, **vmap_args)
@@ -35,6 +56,64 @@ def basic_loss_logger(loss, *args):
             loss=loss,
         )
     )
+
+
+def base_wandb_batch_optim(
+    target: Float[Array, "batch rows cols"],
+    txm0,
+    w0,
+    loss_fn,
+    forward_fn,
+    projection,
+    run_init={},
+    save_dir: str | None = None,
+    image_labels=None,
+    run=None,
+   **optim_args,
+):
+    if run is None:
+        run = wandb.init(**run_init)
+
+    hyperparams = run.config
+
+    state, _ = base_optimize(
+        target,
+        txm0,
+        w0,
+        loss_fn=get_batch_mean_loss(loss_fn),
+        forward_fn=get_batch_fwd(forward_fn),
+        project_fn=projection,
+        eps=hyperparams["eps"],
+        lr=hyperparams["lr"],
+        loss_logger=basic_loss_logger,
+        n_steps=hyperparams["n_steps"],
+        **optim_args
+    )
+
+    if state is None:
+        print("run failed")
+        return
+
+    (txm, weights) = state
+
+    wandb.log({"recovered_params": weights})
+
+    if save_dir is not None and image_labels is not None:
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+
+        run_save_path = os.path.join(save_dir, run.id)
+        os.mkdir(run_save_path)
+
+        labels = [os.path.join(run_save_path, lb) for lb in image_labels]
+
+        for img, label in zip(txm, labels):
+            save_image(img, label)
+            save_image(
+                ops.range_normalize(forward_fn(img, weights)),
+                label.replace(".tif", "_proc.tif"),
+            )
+
 
 def center_crop_with_aspect_ratio(image, target_size=(512, 512)):
     """
@@ -132,9 +211,10 @@ def experiment_args(**arguments):
     return parse_args
 
 
-def save_image(img, path: str, bits: int=8):
+def save_image(img, path: str, bits: int = 8):
     x = ops.range_normalize(img)
     cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
+
 
 def log_image(label, img, bits=8):
     rng = 2**bits - 1
