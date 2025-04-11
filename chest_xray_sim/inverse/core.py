@@ -4,6 +4,8 @@ import optax
 from jaxtyping import Array, Float, PyTree
 from typing import Callable, Optional, Union
 
+import wandb
+
 
 WeightsT = PyTree
 BatchT = Float[Array, "batch rows cols"]
@@ -56,7 +58,6 @@ def base_optimize(
         original_state = (state, opt_state)
         tx_maps, weights = state
 
-
         loss_value_and_grad = jax.value_and_grad(loss_call, argnums=(0, 1))
         loss, (weight_grads, tx_grads) = loss_value_and_grad(weights, tx_maps, target)
         grads = (tx_grads, weight_grads)
@@ -83,6 +84,7 @@ def base_optimize(
 
     for step in range(n_steps):
         if step > 2 and jnp.abs(losses[-1] - losses[-2]) < eps:
+            wandb.log({"convergence_steps": step})
             print(f"Converged after {step} steps")
             break
 

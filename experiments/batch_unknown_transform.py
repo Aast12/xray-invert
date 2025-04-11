@@ -29,7 +29,6 @@ parser = experiment_args(
 
 
 def forward(image, weights):
-    # jax.debug.print('weights= {w}', w=weights)
     x = ops.negative_log(image)
     x = ops.windowing(
         x, weights["window_center"], weights["window_width"], weights["gamma"]
@@ -68,26 +67,22 @@ def run_processing(
     target_meta: list[ChexpertMeta] | None = None,
 ):
     run = wandb.init(**run_init)
-
     run.config['tm_range'] = ','.join(map(str, run.config['tm_init_range']))
     hyperparams = run.config
     batch_shape = target.shape
 
     key = jax.random.PRNGKey(hyperparams["PRNGKey"])
-
     if hyperparams["tm_init_range"] == "target":
         txm0 = target.copy()
     else:
         txm0 = utils.get_random(key, batch_shape, distribution=hyperparams["tm_init_range"])
 
     w0 = {
-        "low_sigma": 10.0,
-        "low_enhance_factor": 0.75,
-        "high_sigma": 0.1,
-        "high_enhance_factor": 0.0,
-        "window_center": 0.5,
-        "window_width": 0.8,
-        "gamma": 1.2,
+        "low_sigma": jax.random.uniform(key, minval=0.1, maxval=10),
+        "low_enhance_factor": jax.random.uniform(key, minval=0.1, maxval=1.0),
+        "window_center": jax.random.uniform(key, minval=0.0, maxval=1.0),
+        "window_width": jax.random.uniform(key, minval=0.0, maxval=1.0),
+        "gamma": jax.random.uniform(key, minval=0.1, maxval=3.0),
     }
 
     def loss_fn(*args):
@@ -102,7 +97,7 @@ def run_processing(
         run=run,
         projection=projection,
         save_dir=save_dir,
-        constant_weights=True,
+        constant_weights=False,
         image_labels=[f"{d['patient_id']}_{d['study']}.tif" for d in target_meta]
         if target_meta
         else None,
@@ -114,7 +109,7 @@ if __name__ == "__main__":
 
     _ = wandb.login()
 
-    PROJECT = "batch-known-transform"
+    PROJECT = "batch-unknown-transform"
     SWEEP_NAME = "fixed-unsharp"
     FWD_DESC = "negative log, windowing, range normalization, unsharp masking, clipping"
 
@@ -124,10 +119,10 @@ if __name__ == "__main__":
 
     TAGS = [
         f"dims={TARGET_SIZE}",
-        *[f.strip() for f in FWD_DESC.split(",")],
         "batch",
-        "known",
+        "unknown",
         f"limit={BATCH_LIMIT}",
+        *[f.strip() for f in FWD_DESC.split(",")],
     ]
 
     args = parser()
@@ -145,16 +140,16 @@ if __name__ == "__main__":
     run_init = dict(
         project=PROJECT,
         notes=f"transformation: {FWD_DESC}",
-        tags=TAGS,
+        tags=TAGS
     )
     sweep_config = {
         "name": SWEEP_NAME,
         "method": "bayes",
         "metric": {"name": "mse", "goal": "minimize"},
         "parameters": {
-            "lr": {"min": 2e-2, "max": 1e-1},
-            "n_steps": {"values": [300, 600, 1200]},
-            "total_variation": {"min": 0.1, "max": 2.0},
+            "lr": {"min": 1e-5, "max": 1e-1},
+            "n_steps": {"values": [500, 700, 1200]},
+            "total_variation": {"values": [0.0, 0.1, 0.01, 0.001]},
             "PRNGKey": {"values": [0, 42]},
             "tm_distribution": {"values": ["target", "uniform", "normal"]},
             "tm_init_range": {

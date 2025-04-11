@@ -27,18 +27,24 @@ DOMAIN_JNP_DTYPES = {
 }
 
 
-def read_image(path, mode=cv2.IMREAD_UNCHANGED, domain=ImageDomain.NORMALIZED):
-    img = cv2.imread(path, mode)
+def read_image(image_path, dtype=np.float32):
+    if dtype not in [np.float16, np.float32, np.float64]:
+        raise ValueError("Output dtype must be float16, float32, or float64")
 
-    dtype = DOMAIN_NP_DTYPES[domain]
-    img = np.array(img, dtype=np.float64)
+    # Read the image
+    image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise ValueError(f"Could not read image from {image_path}")
 
-    img = img / img.max()
-    if domain == ImageDomain.NORMALIZED:
-        return img
+    # Get the maximum value based on the image's dtype
+    dtype_info = np.iinfo(image.dtype) if np.issubdtype(image.dtype, np.integer) else np.finfo(image.dtype)
+    max_value = dtype_info.max
+    normalized_image = image.astype(dtype) / dtype(max_value)
 
-    bit_factor = 2 ** (8 * (DOMAIN_NP_DTYPES[domain]().itemsize)) - 1
-    return (img * bit_factor).astype(dtype)
+    # Ensure all values are in [0, 1] range
+    normalized_image = np.clip(normalized_image, 0., 1.)
+
+    return normalized_image
 
 
 def show_image_dist(img, hist_ax=None, img_ax=None, bins=256):
