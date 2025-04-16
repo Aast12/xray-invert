@@ -1,6 +1,6 @@
 """chexpert dataset."""
 
-from . import chexpert_dataset_builder
+from . import chexpert_plus_dataset_builder
 import tensorflow_datasets as tfds
 
 
@@ -8,7 +8,7 @@ class ChexpertTest(tfds.testing.DatasetBuilderTestCase):
     """Tests for chexpert dataset."""
 
     # TODO(chexpert):
-    DATASET_CLASS = chexpert_dataset_builder.ChexpertPlus
+    DATASET_CLASS = chexpert_plus_dataset_builder.ChexpertPlus
     SPLITS = {
         "train": 3,  # Number of fake train example
         "test": 1,  # Number of fake test example
