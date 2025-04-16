@@ -3,84 +3,87 @@ import pandas as pd
 
 from cv2.typing import MatLike
 from typing import TypedDict
+import typing
 import os
 
+import pandas as pd
+import torch
+import torchvision
+import torchxrayvision as xrv
+from torchvision.io import read_image
+from torch.utils.data import Dataset, DataLoader
+from torchvision.transforms import functional as F
 
-class ChexpertMeta(TypedDict):
-    image_path: str
-    patient_id: str
-    image: MatLike
-    study: str
-    image_label: str
+from torchvision.transforms import v2
 
 
-def load_chexpert(
-    root_dir: str,
-    df_meta_path: str | None = None,
-    img_dir: str | None = None,
-    chexpert_version: str = "240401",
-    limit: int | None = None,
-) -> list[ChexpertMeta]:
-    df_meta_path = (
-        df_meta_path
-        if df_meta_path is not None
-        else os.path.join(root_dir, f"df_chexpert_plus_{chexpert_version}.csv")
-    )
-    img_dir = img_dir if img_dir is not None else os.path.join(root_dir, "PNG")
+class ChexpertDataset(torchvision.datasets.ImageFolder):
+    def __init__(self, root, meta_dir, split=None, **kwargs):
+        super(ChexpertDataset, self).__init__(root=root, **kwargs)
+        self.metadata = pd.read_csv(meta_dir)
+        self.metadata = self.metadata[self.metadata["frontal_lateral"] == "Frontal"]
 
-    df_meta_path = os.path.abspath(df_meta_path)
-    img_dir = os.path.abspath(img_dir)
+        if split is not None:
+            self.metadata = self.metadata[self.metadata["split"] == split]
 
-    df_meta = pd.read_csv(df_meta_path)
-    df_meta = df_meta[df_meta["frontal_lateral"] == "Frontal"]
-
-    images: list[ChexpertMeta] = []
-
-    for idx, row in df_meta.iterrows():
-        img_path = f"{img_dir}/{row['path_to_image']}"
-        patient_id = str(row["deid_patient_id"])
-
-        if not os.path.exists(img_path):
-            # chexpert csv reporting jpgs instead of pngs
-            img_path = img_path.replace(".jpg", ".png")
-            if not os.path.exists(img_path):
-                continue
-
-        if limit and len(images) >= limit:
-            break
-
-        img_label = img_path.split("/")[-1]
-        study = img_path[img_path.find("study") :][:6]
-
-        images.append(
-            {
-                "image": cv2.imread(img_path, cv2.IMREAD_UNCHANGED) / 255.0,
-                "image_path": img_path,
-                "patient_id": patient_id,
-                "study": study,
-                "image_label": img_label,
-            }
+        self.metadata["abs_img_path"] = self.metadata["path_to_image"].apply(
+            lambda x: os.path.join(self.root, x.replace(".jpg", ".png"))
+        )
+        self.metadata["exists"] = self.metadata["abs_img_path"].apply(
+            lambda x: os.path.exists(x)
         )
 
-    return images
+        self.metadata = self.metadata[self.metadata["exists"] == True]
+
+    def __getitem__(self, index):
+        original_tuple = super(ChexpertDataset, self).__getitem__(index)
+
+        img_path = self.imgs[index][0]
+
+        meta = (
+            self.metadata[self.metadata["abs_img_path"] == img_path].head(1).to_dict()
+        )
+
+        # make a new tuple that includes original and the path
+        return original_tuple + (
+            img_path,
+            meta,
+        )
+
+
+def get_chexpert_dataset(data_dir, meta_dir, split=None, **kwargs):
+    ds = ChexpertDataset(
+        root=data_dir,
+        split=split,
+        meta_dir=meta_dir,
+        transform=torchvision.transforms.Compose(
+            [
+                torchvision.transforms.Grayscale(),
+                torchvision.transforms.PILToTensor(),
+                torchvision.transforms.Resize(512),
+                torchvision.transforms.CenterCrop(512),
+                v2.ToDtype(torch.float32, scale=True),
+            ]
+        ),
+    )
+    ds_loader = DataLoader(ds, batch_size=64, shuffle=True)
+    return ds_loader
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-
-    args = parser.parse_args()
-
-    print("args:", args)
-
-    root_path = args.root_path
-    meta_path = args.meta_path
-    img_dir = args.img_dir
-
-    images = load_chexpert(root_path, meta_path, img_dir, limit=10)
+    images = get_chexpert_dataset(
+        data_dir="/Volumes/T7/datasets/chexpert_plus/PNG/PNG/train",
+        meta_dir="/Volumes/T7/datasets/chexpert_plus/df_chexpert_plus_240401.csv",
+    )
 
     import matplotlib.pyplot as plt
 
-    plt.imshow(images[len(images) // 2]["image"], cmap="gray")
-    plt.show()
+    for i in range(1):
+        batch = next(iter(images))
+        img, label, path, meta = batch
+        plt.imshow(
+            img[0][0],
+            cmap="gray",
+        )
+
+        plt.show()
