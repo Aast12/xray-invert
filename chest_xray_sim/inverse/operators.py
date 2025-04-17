@@ -18,6 +18,24 @@ def windowing(image, window_center, window_width, gamma):
     return x
 
 
+def low_pass(image, sigma):
+    x = jnp.expand_dims(image, axis=2)
+    kernel_size = 2 * sigma
+    blurred = gaussian_blur(x, sigma, kernel_size, padding="same")
+
+    return (x - blurred)
+
+
+def unsharp_masking_alt(image, sigma, enhance_factor):
+    x = jnp.expand_dims(image, axis=2)
+    kernel_size = 2 * sigma
+    blurred = gaussian_blur(x, sigma, kernel_size, padding="same")
+
+    factor = 1 / (1 - enhance_factor)
+    x = factor * (x - blurred) + blurred
+
+    return x.squeeze()
+
 def unsharp_masking(image, sigma, enhance_factor):
     x = jnp.expand_dims(image, axis=2)
     kernel_size = 2 * sigma
