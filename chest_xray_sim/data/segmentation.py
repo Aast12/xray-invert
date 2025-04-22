@@ -1,10 +1,8 @@
-import os
 import typing
 
 import torch
-import torchvision
 import torchxrayvision as xrv
-from torch.utils.data import DataLoader
+from torchvision.transforms import v2
 
 from torchxrayvision.baseline_models.chestx_det import PSPNet
 
@@ -58,11 +56,15 @@ def substract_mask(mask0: torch.Tensor, exclude_mask: torch.Tensor) -> torch.Ten
 
 class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
     # Assumes input images are in the range [0, 1]
-    preprocess = torchvision.transforms.Lambda(lambda x: (2 * x - 1.0) * 1024)
+    preprocess = v2.Lambda(lambda x: (2 * x - 1.0) * 1024)
 
     targets_dict: dict[str, int] = {
         PSPNet.targets[i]: i for i in range(len(PSPNet.targets))
     }
+
+    def __init__(self, cache_dir: str | None = None):
+        kwargs = {} if cache_dir is None else {"cache_dir": cache_dir}
+        super(ChestSegmentation, self).__init__(**kwargs)
 
     def forward(self, x):
         return super(ChestSegmentation, self).forward(ChestSegmentation.preprocess(x))
@@ -114,23 +116,30 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
         return aggregated
 
 
-def get_seg_model():
-    return ChestSegmentation(cache_dir="/Volumes/T7/datasets/torchxrayvision")
-
-
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-    from chest_xray_sim.data.loader import read_image
+    from chest_xray_sim.data.utils import read_image
 
-    img_path = (
-        # "/Volumes/T7/projs/thesis/data/conventional_transmissionmap_32bit_[0 1].tif"
-        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif"
-        # "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1.tif"
-    )
-    fwd_path = "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif"
+    model_path = "/Volumes/T7/datasets/torchxrayvision"
+    samples = [
+        (
+            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif",
+            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
+        ),
+        (
+            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1.tif",
+            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1_proc.tif",
+        ),
+        (
+            "/Volumes/T7/projs/thesis/data/conventional_transmissionmap_32bit_[0 1].tif",
+            None,
+        ),
+    ]
+
+    img_path, fwd_path = samples[0]
     base = read_image(img_path)
 
-    model = get_seg_model()
+    model = ChestSegmentation(cache_dir=model_path)
 
     if fwd_path is not None:
         basefwd = read_image(fwd_path)
