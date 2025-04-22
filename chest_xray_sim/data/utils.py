@@ -1,7 +1,23 @@
+import typing
+
+import pandas as pd
 import torch
 from PIL import Image
-import torchvision
 from torchvision.transforms import v2
+
+
+def get_chexpert_transform(
+    size: int = 512, dtype: torch.dtype = torch.float32
+) -> v2.Compose:
+    return v2.Compose(
+        [
+            v2.Grayscale(),
+            v2.PILToTensor(),
+            v2.Resize(size),
+            v2.CenterCrop(size),
+            v2.ToDtype(dtype, scale=True),
+        ]
+    )
 
 
 def read_image(path: str, size: int = 512) -> torch.Tensor:
@@ -24,16 +40,7 @@ def remove_color_channels(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def get_chexpert_transform(
-    size: int = 512, dtype: torch.dtype = torch.float32
-) -> torchvision.transforms.Compose:
-    return torchvision.transforms.Compose(
-        [
-            # v2.Grayscale(),
-            v2.PILToTensor(),
-            v2.Resize(size),
-            v2.CenterCrop(size),
-            v2.ToDtype(dtype, scale=True),
-            v2.Lambda(remove_color_channels),
-        ]
-    )
+def filter_key(df: pd.DataFrame, key: str, value: typing.Any) -> pd.DataFrame:
+    if value is None:
+        return df
+    return df[df[key] == value]

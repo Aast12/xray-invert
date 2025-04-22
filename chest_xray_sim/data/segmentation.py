@@ -70,7 +70,7 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
         return super(ChestSegmentation, self).forward(ChestSegmentation.preprocess(x))
 
     def __call__(self, x):
-        with torch.no_grad():
+        with torch.inference_mode():
             return super(ChestSegmentation, self).__call__(x)
 
     @classmethod
@@ -80,13 +80,16 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
         label: SegmentationLabelsT,
         threshold: float | None = None,
     ) -> torch.Tensor:
+        # if pred.ndim == 3:
+        #     pred = pred.unsqueeze(0)
+
         pred = 1 / (1 + torch.exp(-pred))
 
         if threshold is not None:
             pred[pred < threshold] = 0
             pred[pred >= threshold] = 1
 
-        return pred[0, ChestSegmentation.targets_dict[label]]
+        return pred[ChestSegmentation.targets_dict[label]]
 
     @classmethod
     def get_group_mask(
@@ -99,7 +102,7 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
 
         q = [ChestSegmentation.targets_dict[label] for label in labels]
 
-        return cls._join_masks(torch.sigmoid(pred[0, q]), threshold)
+        return cls._join_masks(torch.sigmoid(pred[q]), threshold)
 
     @classmethod
     def _join_masks(
@@ -119,6 +122,83 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from chest_xray_sim.data.utils import read_image
+    from chest_xray_sim.data.chexpert_dataset import get_chexpert_dataset
+
+    import sys
+
+    model_path = "/Volumes/T7/datasets/torchxrayvision"
+    samples = [
+        (
+            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif",
+            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
+        ),
+        (
+            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1.tif",
+            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1_proc.tif",
+        ),
+        (
+            "/Volumes/T7/projs/thesis/data/conventional_transmissionmap_32bit_[0 1].tif",
+            None,
+        ),
+    ]
+
+    img_path, fwd_path = samples[0]
+    base = read_image(fwd_path)
+
+    print("base shape:", base.shape)
+
+    model = ChestSegmentation(cache_dir=model_path)
+
+    base_seg = model(base)
+
+    print("base_seg shape:", base_seg.shape)
+
+    images = get_chexpert_dataset(
+        data_dir="/Volumes/T7/datasets/chexpert_plus/PNG/PNG/",
+        split="train",
+        meta_dir="/Volumes/T7/datasets/chexpert_plus/df_chexpert_plus_240401.csv",
+        frontal_lateral="Frontal",
+        batch_size=15,
+    )
+    batch = next(iter(images))
+
+    img, meta = batch
+    import os
+
+    path = [os.path.basename(m["abs_img_path"]) for m in meta]
+
+    print("images shape:", img.shape)
+
+    segmentations = model(img)
+
+    print("segmentations shape:", segmentations.shape)
+
+    fig, ax = plt.subplots(3, 4, figsize=(15, 5))
+
+    for i in range(4):
+        if i == 3:
+            im, sgm = base.squeeze(0), base_seg[0]
+        else:
+            im, sgm = img[i].squeeze(0), segmentations[i]
+
+        print("sgm shape", sgm.shape)
+        print("img shape", im.shape)
+
+        bone = model.get_group_mask(sgm, "bone", threshold=None)
+        lung = model.get_group_mask(sgm, "lung", threshold=None)
+
+        ax[0, i].imshow(im, cmap="gray")
+        ax[0, i].set_title(f"Label: {path[i]}")
+        ax[0, i].axis("off")
+
+        a = ax[1, i].imshow(bone)
+        plt.colorbar(a)
+        a = ax[2, i].imshow(lung)
+        plt.colorbar(a)
+    #
+    plt.show()
+
+    sys.exit(0)
 
     model_path = "/Volumes/T7/datasets/torchxrayvision"
     samples = [
