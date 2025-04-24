@@ -16,14 +16,15 @@ class ChexpertMeta(typing.TypedDict):
     """
 
     abs_img_path: str
-    deid_patient_id: typing.NotRequired[str]
+    deid_patient_id: str
     frontal_lateral: typing.NotRequired[str]
     ap_pa: typing.NotRequired[str]
 
 
-ItemT = tuple[torch.Tensor, ChexpertMeta]
+ImageT = torch.Tensor
+ItemT = tuple[ImageT, ChexpertMeta]
 CollateItemT = list[ItemT]
-BatchItemT = tuple[torch.Tensor, list[ChexpertMeta]]
+BatchItemT = tuple[ImageT, list[ChexpertMeta]]
 
 
 class ChexpertDataset(torchvision.datasets.ImageFolder):

@@ -5,7 +5,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from chest_xray_sim.data.chexpert_dataset import ChexpertDataset, ChexpertMeta
-from chest_xray_sim.data.segmentation import ChestSegmentation
+from chest_xray_sim.data.segmentation import (
+    ChestSegmentation,
+    get_group_mask,
+    substract_mask,
+)
 from chest_xray_sim.data.utils import get_chexpert_transform
 
 
@@ -139,20 +143,41 @@ if __name__ == "__main__":
         cache_dir=model_path,
         split="train",
         frontal_lateral="Frontal",
-        batch_size=32,
+        batch_size=4,
     )
 
     batch = next(iter(ds))
     images, masks, meta = batch
 
-    fig, ax = plt.subplots(3, 4, figsize=(15, 5))
+    fig, ax = plt.subplots(2, 4, figsize=(12, 3))
     for i in range(4):
         im, sgm = images[i].squeeze(0), masks[i]
+
+        # ax[0, i].imshow(im, cmap="gray")
+        # ax[1, i].hist(im.ravel(), bins=64)
+
         print("sgm shape", sgm.shape)
         print("img shape", im.shape)
 
-        bone = ChestSegmentation.get_group_mask(sgm, "bone", threshold=None)
-        lung = ChestSegmentation.get_group_mask(sgm, "lung", threshold=None)
+        bone = get_group_mask(sgm, "bone", threshold=0.6).bool()
+        lung = get_group_mask(sgm, "lung", threshold=0.6).bool()
+
+        print("type of masks", bone.dtype, lung.dtype)
+        print("mask shape", bone.shape, lung.shape)
+
+        rest_mask = (torch.ones_like(im) - bone.int()).clip(0, 1) - lung.int()
+        rest_mask = rest_mask.bool()
+
+        ax[0, i].imshow(im, cmap="gray")
+        ax[0, i].axis("off")
+
+        ax[1, i].hist(im.ravel(), bins=100, alpha=0.5, label="image")
+        ax[1, i].hist(im[lung].ravel(), bins=100, alpha=0.5, label="lung")
+        ax[1, i].hist(im[bone].ravel(), bins=100, alpha=0.5, label="bone")
+        ax[1, i].hist(im[rest_mask].ravel(), bins=100, alpha=0.5, label="rest")
+        ax[1, i].axis("off")
+
+        continue
 
         ax[0, i].imshow(im, cmap="gray")
         ax[0, i].set_title(f"Label: {meta[i]['abs_img_path']}")
@@ -163,4 +188,6 @@ if __name__ == "__main__":
         a = ax[2, i].imshow(lung)
         plt.colorbar(a)
 
+    plt.tight_layout()
+    plt.legend()
     plt.show()

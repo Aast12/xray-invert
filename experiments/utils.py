@@ -58,6 +58,57 @@ def basic_loss_logger(loss, *args):
     )
 
 
+def base_wandb_optim_generic(
+    optim_params,
+    run_init={},
+    save_dir: str | None = None,
+    image_labels=None,
+    run=None,
+):
+    if run is None:
+        run = wandb.init(**run_init)
+
+    hyperparams = run.config
+
+    forward_fn = optim_params["forward_fn"]
+    params = {
+        **optim_params,
+        **{
+            "loss_fn": get_batch_mean_loss(optim_params["loss_fn"]),
+            "forward_fn": get_batch_fwd(forward_fn),
+            "eps": hyperparams["eps"],
+            "n_steps": hyperparams["n_steps"],
+        },
+    }
+    state, _ = base_optimize(
+        **params,
+    )
+
+    if state is None:
+        print("run failed")
+        return
+
+    (txm, weights) = state
+
+    wandb.log({"recovered_params": weights})
+
+    if save_dir is not None and image_labels is not None:
+        if not os.path.exists(save_dir):
+            os.mkdir(save_dir)
+
+        run_save_path = os.path.join(save_dir, run.id)
+        os.mkdir(run_save_path)
+
+        labels = [os.path.join(run_save_path, lb) for lb in image_labels]
+
+        for img, label in zip(txm, labels):
+            save_image(img, label)
+            save_image(
+                ops.range_normalize(forward_fn(img, weights)),
+                label.replace(".tif", "_proc.tif"),
+            )
+
+
 def base_wandb_batch_optim(
     target: Float[Array, "batch rows cols"],
     txm0,
@@ -69,7 +120,7 @@ def base_wandb_batch_optim(
     save_dir: str | None = None,
     image_labels=None,
     run=None,
-   **optim_args,
+    **optim_args,
 ):
     if run is None:
         run = wandb.init(**run_init)
@@ -87,7 +138,7 @@ def base_wandb_batch_optim(
         lr=hyperparams["lr"],
         loss_logger=basic_loss_logger,
         n_steps=hyperparams["n_steps"],
-        **optim_args
+        **optim_args,
     )
 
     if state is None:
@@ -216,7 +267,11 @@ def save_image(img, path: str, bits: int = 8):
     cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
 
 
-def log_image(label, img, bits=8):
+def log_image(label: str, img, bits=8):
+    """
+    Log an image to wandb with a specified label and bit depth.
+    Assumes the image is in the range [0, 1] and scales it to the specified bit depth.
+    """
     rng = 2**bits - 1
     dtype = BIT_DTYPES[bits]
     wandb.log({label: wandb.Image(np.array(img * rng, dtype=dtype))})

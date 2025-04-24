@@ -1,11 +1,12 @@
 import typing
+from typing import TypeVar, overload
 
+import jax
+import jax.numpy as jnp
 import torch
 import torchxrayvision as xrv
 from torchvision.transforms import v2
-
 from torchxrayvision.baseline_models.chestx_det import PSPNet
-
 
 SegmentationLabelsT = typing.Literal[
     "Left Clavicle",
@@ -50,8 +51,41 @@ def mask_threshold(
     return mask.int()
 
 
-def substract_mask(mask0: torch.Tensor, exclude_mask: torch.Tensor) -> torch.Tensor:
+@overload
+def substract_mask(mask0: torch.Tensor, exclude_mask: torch.Tensor) -> torch.Tensor: ...
+@overload
+def substract_mask(mask0: jax.Array, exclude_mask: jax.Array) -> jax.Array: ...
+def substract_mask(mask0, exclude_mask):
+    if isinstance(mask0, jax.Array):
+        return jnp.bitwise_xor(mask0, mask0 * exclude_mask)
+
     return torch.bitwise_xor(mask0, mask0 * exclude_mask)
+
+
+@overload
+def _join_masks(pred: torch.Tensor, threshold: float | None = None) -> torch.Tensor: ...
+@overload
+def _join_masks(pred: jax.Array, threshold: float | None = None) -> jax.Array: ...
+
+
+def _join_masks(
+    pred,
+    threshold=None,
+):
+    aggregated = (
+        torch.sigmoid(pred.sum(dim=0))
+        if isinstance(pred, torch.Tensor)
+        else jax.nn.sigmoid(pred.sum(axis=0))
+    )
+
+    if threshold is not None:
+        if isinstance(pred, jax.Array):
+            aggregated = jnp.where(aggregated < threshold, 0, 1)
+        else:
+            aggregated[aggregated < threshold] = 0
+            aggregated[aggregated >= threshold] = 1
+
+    return aggregated
 
 
 class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
@@ -76,55 +110,71 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
     @classmethod
     def get_mask(
         cls,
-        pred: torch.Tensor,
+        pred: torch.Tensor | jax.Array,
         label: SegmentationLabelsT,
         threshold: float | None = None,
-    ) -> torch.Tensor:
-        # if pred.ndim == 3:
-        #     pred = pred.unsqueeze(0)
-
-        pred = 1 / (1 + torch.exp(-pred))
-
+    ) -> torch.Tensor | jax.Array:
         if threshold is not None:
-            pred[pred < threshold] = 0
-            pred[pred >= threshold] = 1
+            if isinstance(pred, jax.Array):
+                pred = jnp.where(jax.nn.sigmoid(pred) < threshold, 0, 1)
+            else:
+                pred = torch.where(torch.sigmoid(pred) < threshold, 0, 1)
 
-        return pred[ChestSegmentation.targets_dict[label]]
+        if isinstance(pred, jax.Array):
+            return pred[jnp.array(cls.targets_dict[label])]
+        return pred[cls.targets_dict[label]]
 
-    @classmethod
-    def get_group_mask(
-        cls,
-        pred: torch.Tensor,
-        group: typing.Literal["bone", "lung"],
-        threshold: float | None = None,
-    ) -> torch.Tensor:
-        labels = bone_labels if group == "bone" else lung_labels
 
-        q = [ChestSegmentation.targets_dict[label] for label in labels]
+@overload
+def get_group_mask(
+    pred: torch.Tensor,
+    group: typing.Literal["bone", "lung"],
+    threshold: float | None = None,
+) -> torch.Tensor: ...
 
-        return cls._join_masks(torch.sigmoid(pred[q]), threshold)
 
-    @classmethod
-    def _join_masks(
-        cls,
-        pred: torch.Tensor,
-        threshold: float | None = None,
-    ) -> torch.Tensor:
-        aggregated = torch.sigmoid(pred.sum(dim=0))
+@overload
+def get_group_mask(
+    pred: jax.Array,
+    group: typing.Literal["bone", "lung"],
+    threshold: float | None = None,
+) -> jax.Array: ...
 
-        if threshold is not None:
-            aggregated[aggregated < threshold] = 0
-            aggregated[aggregated >= threshold] = 1
 
-        return aggregated
+def get_group_mask(
+    pred,
+    group,
+    threshold=None,
+):
+    """
+    Get the group mask for the given group (bone or lung) from the prediction.
+
+    Args:
+        pred: The prediction tensor, shaped (batch_size, num_classes, height, width).
+        group: The group to get the mask for ("bone" or "lung").
+        threshold: The threshold to apply to the mask.
+    """
+    labels = bone_labels if group == "bone" else lung_labels
+
+    q = [ChestSegmentation.targets_dict[label] for label in labels]
+    if isinstance(pred, jax.Array):
+        q = jnp.array(q)
+
+    return _join_masks(
+        jax.nn.sigmoid(pred[q])
+        if isinstance(pred, jax.Array)
+        else torch.sigmoid(pred[q]),
+        threshold,
+    )
 
 
 if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    from chest_xray_sim.data.utils import read_image
-    from chest_xray_sim.data.chexpert_dataset import get_chexpert_dataset
-
     import sys
+
+    import matplotlib.pyplot as plt
+
+    from chest_xray_sim.data.chexpert_dataset import get_chexpert_dataset
+    from chest_xray_sim.data.utils import read_image
 
     model_path = "/Volumes/T7/datasets/torchxrayvision"
     samples = [
@@ -184,8 +234,8 @@ if __name__ == "__main__":
         print("sgm shape", sgm.shape)
         print("img shape", im.shape)
 
-        bone = model.get_group_mask(sgm, "bone", threshold=None)
-        lung = model.get_group_mask(sgm, "lung", threshold=None)
+        bone = get_group_mask(sgm, "bone", threshold=None)
+        lung = get_group_mask(sgm, "lung", threshold=None)
 
         ax[0, i].imshow(im, cmap="gray")
         ax[0, i].set_title(f"Label: {path[i]}")

@@ -69,7 +69,7 @@ def run_processing(
 ):
     run = wandb.init(**run_init)
 
-    run.config['tm_range'] = ','.join(map(str, run.config['tm_init_range']))
+    run.config["tm_range"] = ",".join(map(str, run.config["tm_init_range"]))
     hyperparams = run.config
     batch_shape = target.shape
 
@@ -78,7 +78,9 @@ def run_processing(
     if hyperparams["tm_init_range"] == "target":
         txm0 = target.copy()
     else:
-        txm0 = utils.get_random(key, batch_shape, distribution=hyperparams["tm_init_range"])
+        txm0 = utils.get_random(
+            key, batch_shape, distribution=hyperparams["tm_init_range"]
+        )
 
     w0 = {
         "low_sigma": 10.0,
