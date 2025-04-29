@@ -1,5 +1,5 @@
 import typing
-from typing import TypeVar, overload
+from typing import overload
 
 import jax
 import jax.numpy as jnp
@@ -145,7 +145,7 @@ def get_group_mask(
     pred,
     group,
     threshold=None,
-):
+) -> typing.Union[torch.Tensor, jax.Array]:
     """
     Get the group mask for the given group (bone or lung) from the prediction.
 

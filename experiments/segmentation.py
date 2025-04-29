@@ -1,4 +1,5 @@
 from dataclasses import field, dataclass, MISSING
+import itertools
 import os
 import argparse
 
@@ -18,6 +19,8 @@ from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
 from chest_xray_sim.data.segmentation import ChestSegmentation, get_group_mask
 from chest_xray_sim.inverse.core import segmentation_optimize
 from utils import basic_loss_logger, log_image, experiment_args
+import initialization as init
+import projections as proj
 
 
 b_get_group_mask = jax.vmap(get_group_mask, in_axes=(0, None, None))
@@ -54,39 +57,39 @@ def segmentation_loss(
     The loss consists of:
     1. MSE between prediction and target (data fidelity)
     2. Total variation regularization (spatial smoothness)
-    3. Log-likelihood of the transmission map given anatomical priors (anatomical plausibility)
-    """
-    # Basic MSE loss (data fidelity term)
-    mse = metrics.mse(pred, target)
+    3. Anatomical region range penalty
 
-    # Total variation regularization (spatial smoothness)
+    args:
+        txm: Transmission map
+        weights: Forward model parameters
+        pred: Predicted image
+        target: Target image
+        segmentation: Segmentation map
+        tv_factor: Weight for total variation regularization
+        prior_weight: Weight for anatomical priors
+    """
+    mse = metrics.mse(pred, target)
     tv = metrics.total_variation(txm)
 
-    # Extract bone and lung segmentation masks (probabilities)
-    bone_mask = b_get_group_mask(segmentation, "bone", None)  # Use raw probabilities
-    lung_mask = b_get_group_mask(segmentation, "lung", None)  # Use raw probabilities
+    bone_mask = b_get_group_mask(segmentation, "bone", 0.6)
+    lung_mask = b_get_group_mask(segmentation, "lung", 0.6)
 
-    # Anatomical priors based on known physical properties
-    # For bones (high attenuation = low transmission), we model as beta distribution with mode near 0.2
-    # For lungs (low attenuation = high transmission), we model as beta distribution with mode near 0.8
-    # We use log probabilities to convert to a loss term
+    segmentation_penalty = 0.0
 
-    # Log-likelihood for bone regions - penalize high transmission values in bone regions
-    # Higher probability = lower transmission (negative correlation)
-    bone_prior = -jnp.sum(jnp.log(jnp.maximum(1.0 - txm, 1e-6)) * bone_mask)
+    for mask, val_range in zip([bone_mask, lung_mask], [(0.0, 0.4), (0.6, 1.0)]):
+        min_val, max_val = val_range
 
-    # Log-likelihood for lung regions - penalize low transmission values in lung regions
-    # Higher probability = higher transmission (positive correlation)
-    lung_prior = -jnp.sum(jnp.log(jnp.maximum(txm, 1e-6)) * lung_mask)
+        region_values = txm * mask
+        region_size = jnp.sum(mask)
 
-    # Normalize by area of masks to keep consistent scale regardless of mask size
-    bone_area = jnp.sum(bone_mask) + 1e-6
-    lung_area = jnp.sum(lung_mask) + 1e-6
+        below_min = jnp.maximum(0.0, min_val - region_values) ** 2
+        above_max = jnp.maximum(0.0, region_values - max_val) ** 2
 
-    prior_loss = (bone_prior / bone_area + lung_prior / lung_area) * prior_weight
+        region_penalty = jnp.sum(below_min + above_max)
 
-    # Combined loss with weighted components
-    return mse + tv_factor * tv + prior_loss
+        segmentation_penalty += region_penalty / (region_size + 1e-6)
+
+    return mse + tv_factor * tv + prior_weight * segmentation_penalty
 
 
 def segmentation_projection(txm_state, weights_state, segmentation):
@@ -99,44 +102,15 @@ def segmentation_projection(txm_state, weights_state, segmentation):
     new_weights_state = optax.projections.projection_non_negative(weights_state)
 
     # Apply parameter constraints
-    new_weights_state["low_sigma"] = optax.projections.projection_box(
-        weights_state["low_sigma"], 0.1, 10
+    new_weights_state = proj.project_spec(
+        new_weights_state,
+        {
+            "low_sigma": proj.box(0.1, 10),
+            "low_enhance_factor": proj.box(0.1, 1.0),
+        },
     )
-    new_weights_state["low_enhance_factor"] = optax.projections.projection_box(
-        new_weights_state["low_enhance_factor"], 0.1, 1.0
-    )
 
-    # Get raw segmentation probabilities (confidence values)
-    bone_prob = b_get_group_mask(segmentation, "bone", None)
-    lung_prob = b_get_group_mask(segmentation, "lung", None)
-
-    # Normalize probabilities to [0,1] if needed
-    bone_prob = jnp.clip(bone_prob, 0.0, 1.0)
-    lung_prob = jnp.clip(lung_prob, 0.0, 1.0)
-
-    # Define ideal values for each anatomical region
-    ideal_bone_value = 0.2  # Lower transmission for bones (higher density)
-    ideal_lung_value = 0.8  # Higher transmission for lungs (lower density)
-
-    # Apply soft anatomical constraints - weighted combination of current value and ideal value
-    # The higher the segmentation confidence, the stronger the pull toward the ideal value
-    bone_strength = 0.5  # Controls how strongly we enforce bone constraints
-    lung_strength = 0.5  # Controls how strongly we enforce lung constraints
-
-    # Apply bone constraints with confidence weighting
-    bone_influenced = (
-        1.0 - bone_strength * bone_prob
-    ) * new_txm_state + bone_strength * bone_prob * ideal_bone_value
-
-    # Apply lung constraints with confidence weighting, respecting the bone constraints already applied
-    lung_influenced = (
-        1.0 - lung_strength * lung_prob
-    ) * bone_influenced + lung_strength * lung_prob * ideal_lung_value
-
-    # Ensure we're still in valid range
-    constrained_txm = jnp.clip(lung_influenced, 0.0, 1.0)
-
-    return constrained_txm, new_weights_state
+    return new_txm_state, new_weights_state
 
 
 def save_image(img, path: str, bits=8):
@@ -159,9 +133,6 @@ def run_processing(
 
     images = jnp.array(images_batch.cpu().numpy()).squeeze(1)
     segmentations = jnp.array(masks_batch.cpu().numpy())
-    batch_shape = images.shape
-
-    print("using shapes (imgs, segmentation):", images.shape, segmentations.shape)
 
     # Log example images and segmentations
     for i in range(min(2, images.shape[0])):
@@ -182,32 +153,14 @@ def run_processing(
     # Initialize transmission map with appropriate range
     key = jax.random.PRNGKey(hyperparams["PRNGKey"])
 
-    if hyperparams["tm_init_strategy"] == "target":
-        txm0 = images.copy()
-    elif hyperparams["tm_init_strategy"] == "segmentation_guided":
-        # Create initial guess based on segmentation
-        txm0 = jnp.ones(batch_shape)
-        bone_mask = b_get_group_mask(segmentations, "bone", 0.6)
-        lung_mask = b_get_group_mask(segmentations, "lung", 0.6)
+    init_mode = hyperparams["tm_init_params"][0]
+    init_params = dict(mode=init_mode)
+    if init_mode in ["uniform", "normal"]:
+        init_params["val_range"] = hyperparams["tm_init_params"][1]
+    if init_mode == "target":
+        init_params["target"] = images
 
-        # Set initial values based on anatomy
-        txm0 = jnp.where(bone_mask, 0.2, txm0)  # Bones have high attenuation
-        txm0 = jnp.where(lung_mask, 0.8, txm0)  # Lungs have low attenuation
-
-        # Add small random noise
-        noise = jax.random.uniform(key, shape=batch_shape, minval=-0.05, maxval=0.05)
-        txm0 = jnp.clip(txm0 + noise, 0.01, 0.99)
-    else:
-        # Random initialization
-        txm_min, txm_max = hyperparams["tm_init_range"]
-        if hyperparams["tm_distribution"] == "normal":
-            txm0 = jax.random.normal(key, shape=batch_shape)
-            txm0 = (txm0 - txm0.min()) / (txm0.max() - txm0.min())
-            txm0 = txm0 * (txm_max - txm_min) + txm_min
-        else:
-            txm0 = jax.random.uniform(
-                key, minval=txm_min, maxval=txm_max, shape=batch_shape
-            )
+    txm0 = init.initialize(hyperparams["PRNGKey"], images.shape, **init_params)
 
     # Initial parameters for the forward model
     w0 = {
@@ -219,19 +172,16 @@ def run_processing(
     }
 
     # Create loss function with configurable weights
-    def loss_fn(txm, weights, pred, target, seg):
+    def loss_fn(*args):
         return segmentation_loss(
-            txm,
-            weights,
-            pred,
-            target,
-            seg,
+            *args,
             tv_factor=hyperparams["total_variation"],
             prior_weight=hyperparams["prior_weight"],
         )
 
     # Run optimization with segmentation guidance
     optimizer = optax.adam(learning_rate=hyperparams["lr"])
+    print("initial weights", w0)
     state, losses = segmentation_optimize(
         target=images,
         txm0=txm0,
@@ -241,9 +191,7 @@ def run_processing(
         optimizer=optimizer,
         forward_fn=forward,
         loss_logger=basic_loss_logger,
-        project_fn=segmentation_projection
-        if hyperparams["use_seg_projection"]
-        else None,
+        project_fn=segmentation_projection,
         constant_weights=hyperparams.get("constant_weights", False),
         n_steps=hyperparams["n_steps"],
         eps=hyperparams["eps"],
@@ -309,6 +257,7 @@ if __name__ == "__main__":
 
     TAGS = [
         "segmentation-guided",
+        "square-penalty",
         *[f.strip() for f in FWD_DESC.split(",")],
     ]
 
@@ -340,19 +289,21 @@ if __name__ == "__main__":
         "parameters": {
             "lr": {"min": 5e-3, "max": 5e-2},
             "n_steps": {"values": [300, 600, 1200]},
-            "total_variation": {"min": 0.001, "max": 0.5},
-            "prior_weight": {"min": 0.1, "max": 2.0},  # Weight for anatomical priors
+            "total_variation": {"min": 0.0, "max": 0.5},
+            "prior_weight": {"min": 0.0, "max": 0.2},
             "PRNGKey": {"values": [0, 42]},
-            "tm_distribution": {"values": ["uniform", "normal"]},
-            "tm_init_strategy": {"values": ["random", "segmentation_guided"]},
-            "tm_init_range": {
+            "tm_init_params": {
                 "values": [
-                    (0.01, 0.99),
-                    (0.2, 0.8),
+                    *list(
+                        itertools.product(
+                            ["uniform", "normal"], [(0.01, 0.99), (0.2, 0.8)]
+                        )
+                    ),
+                    ("zeros", None),
+                    ("target", None),
                 ]
             },
-            "use_seg_projection": {"values": [True, False]},
-            "constant_weights": {"values": [True, False]},
+            "constant_weights": {"values": [False]},
             # Fixed parameters
             "eps": {"value": 1e-6},
         },
