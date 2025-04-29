@@ -39,7 +39,6 @@ target = None
 
 
 def run_optimization(target, hyperparams, operator=None, loss_fn=None, **opt_params):
-
     if operator is None:
         operator = build_forward_fn(negative_log, windowing, range_normalize)
     if loss_fn is None:

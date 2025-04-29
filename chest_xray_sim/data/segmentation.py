@@ -40,6 +40,8 @@ lung_labels = [
     "Right Hilus Pulmonis",
 ]
 
+MaskGroupsT = typing.Literal["bone", "lung"]
+
 
 def mask_threshold(
     pred: torch.Tensor,
@@ -128,7 +130,7 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
 @overload
 def get_group_mask(
     pred: torch.Tensor,
-    group: typing.Literal["bone", "lung"],
+    group: MaskGroupsT,
     threshold: float | None = None,
 ) -> torch.Tensor: ...
 
@@ -136,7 +138,7 @@ def get_group_mask(
 @overload
 def get_group_mask(
     pred: jax.Array,
-    group: typing.Literal["bone", "lung"],
+    group: MaskGroupsT,
     threshold: float | None = None,
 ) -> jax.Array: ...
 

@@ -16,11 +16,17 @@ from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
 import chest_xray_sim.inverse.metrics as metrics
 import chest_xray_sim.inverse.operators as ops
 from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
-from chest_xray_sim.data.segmentation import ChestSegmentation, get_group_mask
+from chest_xray_sim.data.segmentation import (
+    ChestSegmentation,
+    get_group_mask,
+    MaskGroupsT,
+)
+from chest_xray_sim.data.utils import read_image
 from chest_xray_sim.inverse.core import segmentation_optimize
 from utils import basic_loss_logger, log_image, experiment_args
 import initialization as init
 import projections as proj
+import matplotlib.pyplot as plt
 
 
 b_get_group_mask = jax.vmap(get_group_mask, in_axes=(0, None, None))
@@ -46,6 +52,31 @@ def forward(image, weights):
     x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
     x = ops.clipping(x)
     return x
+
+
+def extract_region_value_ranges(
+    images: jax.Array,
+    segmentation: jax.Array,
+    regions: list[MaskGroupsT] | MaskGroupsT,
+    threshold: float = 0.6,
+) -> dict[str, tuple[float, float]]:
+    if isinstance(regions, str):
+        regions = [regions]
+
+    region_ranges: dict[str, tuple[float, float]] = {}
+
+    for region_id in regions:
+        mask = b_get_group_mask(segmentation, region_id, threshold)
+
+        region_values = images * mask
+        min_val = jnp.percentile(region_values[mask > 0], 5).item()
+        max_val = jnp.percentile(region_values[mask > 0], 95).item()
+
+        region_ranges[region_id] = (min_val, max_val)
+
+    # plt.show()
+
+    return region_ranges
 
 
 def segmentation_loss(
@@ -181,7 +212,6 @@ def run_processing(
 
     # Run optimization with segmentation guidance
     optimizer = optax.adam(learning_rate=hyperparams["lr"])
-    print("initial weights", w0)
     state, losses = segmentation_optimize(
         target=images,
         txm0=txm0,
@@ -262,6 +292,36 @@ if __name__ == "__main__":
     ]
 
     print("Using args:", args)
+
+    # read prior images
+    real_tm_paths = [
+        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif",
+        "/Volumes/T7/projs/thesis/data/conventional_transmissionmap.tif",
+    ]
+    fwd_img_paths = [
+        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
+        "/Volumes/T7/projs/thesis/data/conventional_processed.tif",
+    ]
+    print("len paths", len(real_tm_paths))
+
+    model = ChestSegmentation(cache_dir=args.cache_dir)
+    im = [read_image(path) for path in real_tm_paths]
+    print("len images", len(im))
+
+    real_tm_images = torch.stack(im)
+    real_tm_segmentations = model(
+        torch.stack([read_image(path) for path in fwd_img_paths])
+    )
+    real_tm_images = jnp.array(real_tm_images.cpu().numpy()).squeeze(1)
+    real_tm_segmentations = jnp.array(real_tm_segmentations.cpu().numpy())
+
+    print("tm shape:", real_tm_images[0].shape)
+    print("seg shape:", real_tm_segmentations[0].shape)
+
+    value_ranges = extract_region_value_ranges(
+        real_tm_images, real_tm_segmentations, ["bone", "lung"]
+    )
+    print("value ranges:", value_ranges)
 
     # Load dataset with segmentations
     dataset = get_segmentation_dataset(
