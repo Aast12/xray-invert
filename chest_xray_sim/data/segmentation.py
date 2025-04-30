@@ -1,5 +1,5 @@
 import typing
-from typing import overload
+from typing import get_args, overload
 
 import jax
 import jax.numpy as jnp
@@ -40,7 +40,24 @@ lung_labels = [
     "Right Hilus Pulmonis",
 ]
 
-MaskGroupsT = typing.Literal["bone", "lung"]
+soft_labels = [
+    "Heart",
+    "Aorta",
+    "Mediastinum",
+    "Facies Diaphragmatica",
+    "Weasand",
+]
+
+
+# ORDER MATTERS! see get_exclusive_masks
+MaskGroupsT = typing.Literal["lung", "soft", "bone"]
+MASK_GROUPS: tuple[MaskGroupsT, ...] = get_args(MaskGroupsT)
+
+MASK_GROUPS_LABELS: dict[MaskGroupsT, list[str]] = {
+    "bone": bone_labels,
+    "lung": lung_labels,
+    "soft": soft_labels,
+}
 
 
 def mask_threshold(
@@ -149,14 +166,14 @@ def get_group_mask(
     threshold=None,
 ) -> typing.Union[torch.Tensor, jax.Array]:
     """
-    Get the group mask for the given group (bone or lung) from the prediction.
+    Get the group mask for the given group from the prediction.
 
     Args:
         pred: The prediction tensor, shaped (batch_size, num_classes, height, width).
-        group: The group to get the mask for ("bone" or "lung").
-        threshold: The threshold to apply to the mask.
+        group: The group to get the mask (see MaskGroupsT).
+        threshold: The threshold to discretize the mask (confidence to binary). If None, the mask is not thresholded.
     """
-    labels = bone_labels if group == "bone" else lung_labels
+    labels = MASK_GROUPS_LABELS[group]
 
     q = [ChestSegmentation.targets_dict[label] for label in labels]
     if isinstance(pred, jax.Array):
@@ -168,6 +185,26 @@ def get_group_mask(
         else torch.sigmoid(pred[q]),
         threshold,
     )
+
+
+def get_exclusive_masks(pred: jax.Array, threshold: float | None=None) -> dict[MaskGroupsT, jax.Array]:
+    complete_masks = [get_group_mask(pred, group, threshold) for group in MASK_GROUPS]
+
+    exclusive_masks = []
+    for i, mask in enumerate(complete_masks):
+        exclusive_mask = mask.copy()
+        for other_mask in exclusive_masks + complete_masks[i + 1 :]:
+            exclusive_mask = substract_mask(exclusive_mask, other_mask)
+        #
+        # for j, other_mask in enumerate(exclusicomplete_masks):
+        #     if j < i:
+        #         exclusive_mask = substract_mask(exclusive_mask, exclusive_masks[j])
+        #     elif j > i:
+        #         exclusive_mask = substract_mask(exclusive_mask, other_mask)
+
+        exclusive_masks.append(exclusive_mask)
+
+    return {group_id: mask for group_id, mask in zip(MASK_GROUPS, exclusive_masks)}
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ def _range_init(
 def initialize(
     seed: int,
     shape: tuple[int, ...] = (),
-    mode: Literal["normal", "uniform", "copy", "zeros"] = "uniform",
+    mode: Literal["normal", "uniform", "target", "zeros"] = "uniform",
     val_range: tuple[float, float] | None = None,
     target: jax.Array | None = None,
     axis: int | None = 0,
@@ -52,7 +52,7 @@ def initialize(
     key = jax.random.key(seed)
     if mode == "normal" or mode == "uniform":
         return _range_init(key, shape, val_range, mode, axis, *kwargs)
-    elif mode == "copy":
+    elif mode == "target":
         assert target is not None, "target must be provided for copy mode"
         return target.copy()
     elif mode == "zeros":

@@ -10,9 +10,12 @@ import wandb
 
 WeightsT = PyTree
 BatchT = Float[Array, "batch rows cols"]
-SegmentationT = Float[Array, "batch channels rows cols"]
+# SegmentationT = Float[Array, "batch channels rows cols"]
+SegmentationT = PyTree  # dict of mask ids - batch channels rows cols
 LossFnT = Callable[[BatchT, WeightsT, BatchT, BatchT], Float[Array, ""]]
-SegLossFnT = Callable[[BatchT, WeightsT, BatchT, BatchT, SegmentationT], Float[Array, ""]]
+SegLossFnT = Callable[
+    [BatchT, WeightsT, BatchT, BatchT, SegmentationT], Float[Array, ""]
+]
 ForwardFnT = Callable[[BatchT, WeightsT], BatchT]
 ProjectFnT = Callable[[PyTree, WeightsT], tuple[PyTree, WeightsT]]
 SegProjectFnT = Callable[[PyTree, WeightsT, SegmentationT], tuple[PyTree, WeightsT]]
@@ -127,7 +130,7 @@ def segmentation_optimize(
 ) -> OptimizationRetT:
     """
     Optimization function that incorporates segmentation data for improved transmission map recovery.
-    
+
     Args:
         target: The target processed X-ray images
         txm0: Initial transmission map estimate
@@ -143,10 +146,11 @@ def segmentation_optimize(
         loss_logger: Optional function to log losses
         eps: Convergence threshold
         segmentation_weights: Optional dict with weights for different segmentation components
-        
+
     Returns:
         Tuple of (state, losses) where state is (transmission_map, weights)
     """
+
     def loss_call(weights, tx_maps, target, seg):
         pred = forward_fn(tx_maps, weights)
         loss = loss_fn(tx_maps, weights, pred, target, seg)
@@ -160,7 +164,6 @@ def segmentation_optimize(
 
         return loss
 
-
     state = (txm0, w0)
 
     opt_state = optimizer.init(state)
@@ -173,7 +176,9 @@ def segmentation_optimize(
         tx_maps, weights = state
 
         loss_value_and_grad = jax.value_and_grad(loss_call, argnums=(0, 1))
-        loss, (weight_grads, tx_grads) = loss_value_and_grad(weights, tx_maps, target, seg)
+        loss, (weight_grads, tx_grads) = loss_value_and_grad(
+            weights, tx_maps, target, seg
+        )
         grads = (tx_grads, weight_grads)
 
         updates, new_opt_state = optimizer.update(grads, opt_state)
