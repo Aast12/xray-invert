@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import torch
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, Integer
 import wandb
 
 from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
@@ -19,6 +19,7 @@ from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
 from chest_xray_sim.data.segmentation import (
     MASK_GROUPS,
     ChestSegmentation,
+    batch_get_exclusive_masks,
     get_exclusive_masks,
     get_group_mask,
     MaskGroupsT,
@@ -29,6 +30,7 @@ from utils import basic_loss_logger, log_image, experiment_args
 import initialization as init
 import projections as proj
 import matplotlib.pyplot as plt
+import time
 
 
 DEBUG = True
@@ -67,7 +69,7 @@ def forward(image, weights):
 def visualize_segmentation(
     images: jax.Array,
     merged_masks: jax.Array,
-    exclusive_masks: dict[str, jax.Array],
+    exclusive_masks: jax.Array,
     regions: list[MaskGroupsT] = list(MASK_GROUPS),
 ):
     _, ax = plt.subplots(images.shape[0], len(regions) + 2, figsize=(12, 6))
@@ -78,7 +80,7 @@ def visualize_segmentation(
     min_masked_values = jnp.min(images * merged_masks, axis=(1, 2))
 
     for j, region_id in enumerate(regions):
-        mask = exclusive_masks[region_id]
+        mask = exclusive_masks[:, j]  # TODO: assumes full list MASK_GROUPS
 
         region_values = images * mask
         for i, mv in enumerate(region_values):
@@ -177,7 +179,7 @@ def extract_region_value_ranges(
     regions: list[MaskGroupsT] | MaskGroupsT,
     threshold: float = 0.6,
     collimated_area_bound: float = 0.8,
-) -> dict[MaskGroupsT, tuple[float, float]]:
+) -> tuple[list[MaskGroupsT], Float[Array, "mask_groups 2"]]:
     """
     Idea:
 
@@ -191,18 +193,26 @@ def extract_region_value_ranges(
     if isinstance(regions, str):
         regions = [regions]
 
-    region_ranges= {}
+    region_ranges = {}
 
-    exclusive_masks = b_get_exclusive_masks(segmentation, threshold)
-    merged_masks = jnp.sum(jnp.stack(list(exclusive_masks.values())), axis=0)
-    # todo: assumes hard masks (not-None threshold)
+    # exclusive_masks = b_get_exclusive_masks(segmentation, threshold)
+    exclusive_mask_labels, exclusive_masks = batch_get_exclusive_masks(
+        segmentation, threshold
+    )
+
+    print("exc masks shape: ", exclusive_masks.shape)
+    print("images shape: ", images.shape)
+
+    merged_masks = jnp.sum(exclusive_masks, axis=1)
+    print("merged masks shape", merged_masks.shape)
+    # TODO: assumes hard masks (not-None threshold)
     merged_masks = jnp.clip(merged_masks, 0, 1)
 
     max_masked_values = jnp.max(images * merged_masks, axis=(1, 2))
     min_masked_values = jnp.min(images * merged_masks, axis=(1, 2))
 
     for region_id in regions:
-        mask = exclusive_masks[region_id]
+        mask = exclusive_masks[:, exclusive_mask_labels.index(region_id)]
 
         min_values = jnp.min(images, axis=(1, 2), where=mask > 0, initial=jnp.inf)
         max_values = jnp.max(images, axis=(1, 2), where=mask > 0, initial=0.0)
@@ -226,13 +236,25 @@ def extract_region_value_ranges(
             y=max_values.mean(),
         )
 
-        region_ranges[region_id] = (min_values.mean().item(), max_values.mean().item())
+        region_ranges[region_id] = jnp.array([min_values.mean(), max_values.mean()])
 
-    return region_ranges
+    # visualize_segmentation(images, merged_masks, exclusive_masks, regions)
+
+    return (regions, jnp.stack(list(region_ranges.values())))
+
+
+REDO = False
 
 
 def segmentation_loss(
-        txm, weights, pred, target, segmentation, value_ranges: dict[MaskGroupsT, tuple[float, float]], tv_factor=0.1, prior_weight=0.5
+    txm: Float[Array, "batch height width"],
+    weights,
+    pred: Float[Array, "batch height width"],
+    target: Float[Array, "batch height width"],
+    segmentation: Float[Array, "batch reduced_labels height width"],
+    value_ranges: Float[Array, "reduced_labels 2"],
+    tv_factor=0.1,
+    prior_weight=0.5,
 ):
     """
     Loss function that incorporates segmentation information using probabilistic priors.
@@ -251,13 +273,42 @@ def segmentation_loss(
         tv_factor: Weight for total variation regularization
         prior_weight: Weight for anatomical priors
     """
+    global REDO
     mse = metrics.mse(pred, target)
     tv = metrics.total_variation(txm)
 
     segmentation_penalty = 0
 
-    for mask_id, val_range in value_ranges.items(): 
-        mask = segmentation[mask_id]
+    if not REDO:
+        # TODO: may be optimized by doing array operations at once and/or parallel
+        #
+        region_values: Float[Array, "batch reduced_label height width"] = (
+            jnp.expand_dims(txm, axis=1) * segmentation
+        )
+
+        # TODO: assumes a hard mask (not-None threshold)
+        region_size = jnp.sum(segmentation, axis=(-2, -1))
+
+        exp_value_ranges = value_ranges.reshape(1, -1, 1, 1, 2)
+
+        below_min = jnp.maximum(0.0, exp_value_ranges[..., 0] - region_values) ** 2
+        above_max = jnp.maximum(0.0, exp_value_ranges[..., 1] - region_values) ** 2
+
+        jax.debug.print(
+            "first below_min: {x} \n above max: {y}",
+            x=below_min.sum(axis=(-2, -1)),
+            y=above_max.sum(axis=(-2, -1)),
+        )
+
+        # region_penalty = jnp.sum(below_min + above_max, axis=(-2, -1))
+
+        # segmentation_penalty = jnp.sum(region_penalty / (region_size + 1e-6))
+
+    below_min_s = jnp.ones(value_ranges.shape[0]) if not REDO else None
+    above_max_s = jnp.ones(value_ranges.shape[0]) if not REDO else None
+
+    for mask_id, val_range in enumerate(value_ranges):
+        mask = segmentation[:, mask_id]
         min_val, max_val = val_range
 
         region_values = txm * mask
@@ -266,14 +317,24 @@ def segmentation_loss(
         below_min = jnp.maximum(0.0, min_val - region_values) ** 2
         above_max = jnp.maximum(0.0, region_values - max_val) ** 2
 
+        if not REDO:
+            below_min_s = below_min_s.at[mask_id].set(jnp.sum(below_min))
+            above_max_s = above_max_s.at[mask_id].set(jnp.sum(above_max))
+
         region_penalty = jnp.sum(below_min + above_max)
 
         segmentation_penalty += region_penalty / (region_size + 1e-6)
 
+    if not REDO:
+        jax.debug.print(
+            "second below_min: {x} \n above max: {y}", x=below_min_s, y=above_max_s
+        )
+        REDO = True
+
     return mse + tv_factor * tv + prior_weight * segmentation_penalty
 
 
-def batch_evaluation(images, segmentations, txm, weights):
+def batch_evaluation(images, txm, weights):
     """
     Evaluate the model on a batch of images and segmentations.
     """
@@ -285,9 +346,11 @@ def batch_evaluation(images, segmentations, txm, weights):
     psnr = metrics.psnr(pred, images)
     ssim = metrics.ssim(pred, images)
 
+    print("types:", type(mse), type(psnr), type(ssim))
+    print("metrics shapes:", mse.shape, psnr.shape, ssim.shape)
+
     # Log metrics
     wandb.log({"mse": mse, "psnr": psnr, "ssim": ssim})
-
 
 
 def segmentation_projection(txm_state, weights_state, segmentation):
@@ -319,10 +382,10 @@ def save_image(img, path: str, bits=8):
 
 
 def run_processing(
-    images_batch,
-    masks_batch,
+    images_batch: Float[torch.Tensor, "batch height width"],
+    masks_batch: Float[torch.Tensor, "batch labels height width"],
     meta_batch: list[ChexpertMeta],
-    value_ranges,
+    value_ranges: Float[Array, "reduced_labels 2"],
     run_init={},
     save_dir=None,
 ):
@@ -330,25 +393,32 @@ def run_processing(
     run = wandb.init(**run_init)
     hyperparams = run.config
 
+    print("images batch info:", type(images_batch), images_batch.type)
+    print("masks batch info:", type(masks_batch), masks_batch.type)
+
+    wandb.log({"priors": value_ranges})
+
     images = jnp.array(images_batch.cpu().numpy()).squeeze(1)
-    segmentations = jnp.array(masks_batch.cpu().numpy())
-    # todo: make hyperparameter/configurable
     segmentation_th = 0.6
-    segmentations = b_get_exclusive_masks(segmentations, segmentation_th)
+    seg_labels, segmentations = batch_get_exclusive_masks(
+        jnp.array(masks_batch.cpu().numpy()), segmentation_th
+    )
+
+    print("segmentations shape", segmentations.shape)
+
+    rand_index = np.random.randint(0, images.shape[0])
 
     # Log example images and segmentations
-    for i in range(min(2, images.shape[0])):
-        bone_mask = segmentations["bone"][i]
-        lung_mask = segmentations["lung"][i]
-        log_image(f"input_image_{i}", images[i])
-        log_image(f"bone_seg_{i}", bone_mask)
-        log_image(f"input_image_{i}", images[i])
-        log_image(f"lung_seg_{i}", lung_mask)
+    wandb.log({"image_histogram": wandb.Histogram(images[rand_index].flatten())})
+    for i, label in enumerate(seg_labels):
+        mask = segmentations[rand_index, i]
+        log_image("input_image", images[rand_index])
+        log_image(f"{label}_seg", mask)
         wandb.log(
             {
-                "image_histogram": wandb.Histogram(images[i].flatten()),
-                "bone_histogram": wandb.Histogram(images[i][bone_mask].flatten()),
-                "lung_histogram": wandb.Histogram(images[i][lung_mask].flatten()),
+                "segmentation_histogram": wandb.Histogram(
+                    images[rand_index][mask].flatten()
+                ),
             }
         )
 
@@ -409,11 +479,20 @@ def run_processing(
     wandb.log({"recovered_params": weights})
 
     # Log example recovered images
-    for i in range(min(2, images.shape[0])):
-        recovered_image = forward(txm[i], weights)
-        log_image(f"original_{i}", images[i])
-        log_image(f"recovered_txm_{i}", txm[i])
-        log_image(f"recovered_processed_{i}", recovered_image)
+    recovered_image = forward(txm[rand_index], weights)
+    log_image(f"original_{rand_index}", images[i])
+    log_image(f"recovered_txm_{rand_index}", txm[rand_index])
+    log_image(f"recovered_processed_{rand_index}", recovered_image)
+
+    try:
+        batch_evaluation(
+            images,
+            txm,
+            weights,
+        )
+    except Exception as e:
+        print("Error during batch evaluation:", e)
+        # wandb.log({"batch_evaluation_error": str(e)})
 
     # Save results if needed
     if save_dir is not None:
@@ -442,6 +521,42 @@ def run_processing(
     return state
 
 
+def get_priors(segmentation_cache_dir: str):
+    # read prior images
+    real_tm_paths = [
+        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif",
+        "/Volumes/T7/projs/thesis/data/conventional_transmissionmap.tif",
+    ]
+    fwd_img_paths = [
+        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
+        "/Volumes/T7/projs/thesis/data/conventional_processed.tif",
+    ]
+
+    segmentation_model = ChestSegmentation(cache_dir=segmentation_cache_dir)
+
+    real_tm_data = torch.stack([read_image(path) for path in real_tm_paths])
+    processed_data = torch.stack([read_image(path) for path in fwd_img_paths])
+
+    print("prior data size:", len(real_tm_data))
+
+    # segmentation model was trained on processed images, segmentations have to be
+    # pulled from applying a forward image processing to the real transmission maps
+    real_tm_segmentations = segmentation_model(processed_data)
+    real_tm_images = jnp.array(real_tm_data.cpu().numpy()).squeeze(1)
+    real_tm_segmentations = jnp.array(real_tm_segmentations.cpu().numpy())
+
+    value_range_labels, value_ranges = extract_region_value_ranges(
+        real_tm_images, real_tm_segmentations, list(MASK_GROUPS)
+    )
+    print("value ranges:", value_ranges)
+    print("expanded val ranges:", value_ranges.reshape(1, -1, 1, 1, 2))
+
+    del segmentation_model
+
+    # TODO: incomplete label forwarding
+    return value_ranges
+
+
 if __name__ == "__main__":
     args = args_spec()
 
@@ -465,34 +580,8 @@ if __name__ == "__main__":
 
     print("Using args:", args)
 
-    # read prior images
-    real_tm_paths = [
-        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif",
-        "/Volumes/T7/projs/thesis/data/conventional_transmissionmap.tif",
-    ]
-    fwd_img_paths = [
-        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
-        "/Volumes/T7/projs/thesis/data/conventional_processed.tif",
-    ]
-    print("len paths", len(real_tm_paths))
+    value_ranges = get_priors(args.cache_dir)
 
-    model = ChestSegmentation(cache_dir=args.cache_dir)
-    im = [read_image(path) for path in real_tm_paths]
-    print("len images", len(im))
-
-    real_tm_images = torch.stack(im)
-    real_tm_segmentations = model(
-        torch.stack([read_image(path) for path in fwd_img_paths])
-    )
-    real_tm_images = jnp.array(real_tm_images.cpu().numpy()).squeeze(1)
-    real_tm_segmentations = jnp.array(real_tm_segmentations.cpu().numpy())
-
-    print("tm shape:", real_tm_images[0].shape)
-    print("seg shape:", real_tm_segmentations[0].shape)
-
-    value_ranges = extract_region_value_ranges(
-        real_tm_images, real_tm_segmentations, list(MASK_GROUPS)
-    )
     print("value ranges:", value_ranges)
 
     # Load dataset with segmentations
@@ -551,7 +640,14 @@ if __name__ == "__main__":
         batch = next(iter(dataset))
         images, masks, meta = batch
 
-        run_processing(images, masks, meta, value_ranges=value_ranges, save_dir=args.save_dir, run_init=run_init)
+        run_processing(
+            images,
+            masks,
+            meta,
+            value_ranges=value_ranges,
+            save_dir=args.save_dir,
+            run_init=run_init,
+        )
 
     wandb.agent(
         sweep_id,

@@ -1,17 +1,18 @@
+import time
 from abc import ABC, abstractmethod
+from typing import Callable, Dict, Generic, List, Optional, Tuple, TypeVar, Union
+
 import jax
 import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float, PyTree
-from typing import Callable, Generic, Optional, TypeVar, Union, Dict, Tuple, List
 
 import wandb
 
-
 WeightsT = PyTree
 BatchT = Float[Array, "batch rows cols"]
-# SegmentationT = Float[Array, "batch channels rows cols"]
-SegmentationT = PyTree  # dict of mask ids - batch channels rows cols
+SegmentationT = Float[Array, "batch labels rows cols"]
+# SegmentationT = PyTree  # dict of mask ids - batch channels rows cols
 LossFnT = Callable[[BatchT, WeightsT, BatchT, BatchT], Float[Array, ""]]
 SegLossFnT = Callable[
     [BatchT, WeightsT, BatchT, BatchT, SegmentationT], Float[Array, ""]
@@ -198,7 +199,14 @@ def segmentation_optimize(
 
         return loss, new_state, new_opt_state
 
+    avg_it_time = 0.0
+    max_it_time = 0.0
+    min_it_time = float("inf")
+
+    long_step = time.time()
+
     for step in range(n_steps):
+        st = time.time()
         if step > 2 and jnp.abs(losses[-1] - losses[-2]) < eps:
             wandb.log({"convergence_steps": step})
             print(f"Converged after {step} steps")
@@ -214,8 +222,27 @@ def segmentation_optimize(
 
         if step % 100 == 0:
             print(f"\nStep {step}, Loss: {loss:.6f}")
-
+            wandb.log(
+                {
+                    "mins_per_hundred_steps": (time.time() - long_step) / 60,
+                }
+            )
+            long_step = time.time()
         prev_state = (state, loss)
+
+        it_time = time.time() - st
+        avg_it_time = (avg_it_time * step + it_time) / (step + 1)
+        max_it_time = max(max_it_time, it_time)
+        min_it_time = min(min_it_time, it_time)
+
+    # TODO: abstract out
+    wandb.log(
+        {
+            "avg_it_time": avg_it_time,
+            "max_it_time": max_it_time,
+            "min_it_time": min_it_time,
+        }
+    )
 
     if state is None:
         return None, losses

@@ -4,9 +4,13 @@ from typing import get_args, overload
 import jax
 import jax.numpy as jnp
 import torch
+from torch import Tensor
 import torchxrayvision as xrv
 from torchvision.transforms import v2
 from torchxrayvision.baseline_models.chestx_det import PSPNet
+from jaxtyping import Array, Float, Integer
+
+ArrayT = typing.Union[Array, Tensor]
 
 SegmentationLabelsT = typing.Literal[
     "Left Clavicle",
@@ -61,9 +65,9 @@ MASK_GROUPS_LABELS: dict[MaskGroupsT, list[str]] = {
 
 
 def mask_threshold(
-    pred: torch.Tensor,
+    pred: Float[Tensor, "*batch height width"],
     threshold: float,
-) -> torch.Tensor:
+) -> Integer[Tensor, "*batch height width"]:
     mask = pred.clone()
     mask[mask >= threshold] = 1
     mask[mask < threshold] = 0
@@ -71,10 +75,19 @@ def mask_threshold(
 
 
 @overload
-def substract_mask(mask0: torch.Tensor, exclude_mask: torch.Tensor) -> torch.Tensor: ...
+def substract_mask(
+    mask0: Float[Tensor, "*batch height width"],
+    exclude_mask: Float[Tensor, "*batch height width"],
+) -> Float[Tensor, "*batch height width"]: ...
 @overload
-def substract_mask(mask0: jax.Array, exclude_mask: jax.Array) -> jax.Array: ...
-def substract_mask(mask0, exclude_mask):
+def substract_mask(
+    mask0: Float[Array, "*batch height width"],
+    exclude_mask: Float[Array, "*batch height width"],
+) -> Float[Array, "*batch height width"]: ...
+def substract_mask(
+    mask0,
+    exclude_mask,
+):
     if isinstance(mask0, jax.Array):
         return jnp.bitwise_xor(mask0, mask0 * exclude_mask)
 
@@ -82,11 +95,15 @@ def substract_mask(mask0, exclude_mask):
 
 
 @overload
-def _join_masks(pred: torch.Tensor, threshold: float | None = None) -> torch.Tensor: ...
+def _join_masks(
+    pred: Float[Array, "num_classes height width"],
+    threshold: float | None = None,
+) -> Float[Array, "height width"]: ...
 @overload
-def _join_masks(pred: jax.Array, threshold: float | None = None) -> jax.Array: ...
-
-
+def _join_masks(
+    pred: Float[Tensor, "num_classes height width"],
+    threshold: float | None = None,
+) -> Float[Tensor, "height width"]: ...
 def _join_masks(
     pred,
     threshold=None,
@@ -95,6 +112,38 @@ def _join_masks(
         torch.sigmoid(pred.sum(dim=0))
         if isinstance(pred, torch.Tensor)
         else jax.nn.sigmoid(pred.sum(axis=0))
+    )
+
+    if threshold is not None:
+        if isinstance(pred, jax.Array):
+            aggregated = jnp.where(aggregated < threshold, 0, 1)
+        else:
+            aggregated[aggregated < threshold] = 0
+            aggregated[aggregated >= threshold] = 1
+
+    return aggregated
+
+
+@overload
+def _batch_join_masks(
+    pred: Float[Array, "batch labels height width"],
+    threshold=...,
+) -> Float[Array, "batch labels height width"]: ...
+@overload
+def _batch_join_masks(
+    pred: Float[Tensor, "batch labels height width"],
+    threshold=...,
+) -> Float[Tensor, "batch labels height width"]: ...
+
+
+def _batch_join_masks(
+    pred,
+    threshold: float | None = None,
+):
+    aggregated = (
+        torch.sigmoid(pred.sum(dim=1, keepdim=True))
+        if isinstance(pred, torch.Tensor)
+        else jax.nn.sigmoid(pred.sum(axis=1, keepdims=True))
     )
 
     if threshold is not None:
@@ -146,25 +195,23 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
 
 @overload
 def get_group_mask(
-    pred: torch.Tensor,
-    group: MaskGroupsT,
-    threshold: float | None = None,
-) -> torch.Tensor: ...
-
-
+    pred: Float[Array, "batch_size num_clases height width"],
+    group,
+    threshold=...,
+) -> Float[Array, "batch_size height width"]: ...
 @overload
 def get_group_mask(
-    pred: jax.Array,
-    group: MaskGroupsT,
-    threshold: float | None = None,
-) -> jax.Array: ...
+    pred: Float[Tensor, "batch_size num_clases height width"],
+    group,
+    threshold=...,
+) -> Float[Tensor, "batch_size height width"]: ...
 
 
 def get_group_mask(
     pred,
-    group,
+    group: MaskGroupsT,
     threshold=None,
-) -> typing.Union[torch.Tensor, jax.Array]:
+):
     """
     Get the group mask for the given group from the prediction.
 
@@ -187,7 +234,71 @@ def get_group_mask(
     )
 
 
-def get_exclusive_masks(pred: jax.Array, threshold: float | None=None) -> dict[MaskGroupsT, jax.Array]:
+def batched_get_group_mask(
+    pred: Float[Array, "batch labels height width"],
+    group: MaskGroupsT,
+    threshold: float | None = None,
+) -> Float[Array, "batch labels height width"]:  # TODO: check shape here
+    """
+    Get the group mask for the given group from the prediction.
+
+    Args:
+        pred: The prediction tensor, shaped (batch_size, num_classes, height, width).
+        group: The group to get the mask (see MaskGroupsT).
+        threshold: The threshold to discretize the mask (confidence to binary). If None, the mask is not thresholded.
+    """
+    labels = MASK_GROUPS_LABELS[group]
+
+    q = [ChestSegmentation.targets_dict[label] for label in labels]
+    if isinstance(pred, jax.Array):
+        q = jnp.array(q)
+
+    return _batch_join_masks(
+        jax.nn.sigmoid(pred[:, q])
+        if isinstance(pred, jax.Array)
+        else torch.sigmoid(pred[:, q]),
+        threshold,
+    )
+
+
+def batch_get_exclusive_masks(
+    pred: Float[Array, "batch labels height width"],
+    threshold: float | None = None,
+) -> tuple[list[MaskGroupsT], Float[Array, "batch reduced_labels height width"]]:
+    ordered_groups = MASK_GROUPS
+    # TODO: rewrite for group of masks?
+    complete_masks = [
+        batched_get_group_mask(pred, group, threshold) for group in ordered_groups
+    ]
+
+    complete_masks = jnp.concat(complete_masks, axis=1)
+
+    # complete_masks: Float[Array, "batch labels height width"] = batched_get_group_mask(
+    #     pred, MASK_GROUPS, threshold
+    # )
+
+    exclusive_masks = complete_masks.copy()
+    for i in range(complete_masks.shape[1]):
+        for j in range(complete_masks.shape[1]):
+            if i == j:
+                continue
+            if j < i:
+                exclusive_masks = exclusive_masks.at[:, i].set(
+                    substract_mask(exclusive_masks[:, i], exclusive_masks[:, j])
+                )
+            elif j > i:
+                exclusive_masks = exclusive_masks.at[:, i].set(
+                    substract_mask(exclusive_masks[:, i], complete_masks[:, j])
+                )
+
+    return list(ordered_groups), exclusive_masks
+
+
+def get_exclusive_masks(
+    pred: Float[Array, "batch labels height width"],
+    threshold: float | None = None,
+) -> dict[MaskGroupsT, jax.Array]:
+    print("getting exclusive masks", pred.shape)
     complete_masks = [get_group_mask(pred, group, threshold) for group in MASK_GROUPS]
 
     exclusive_masks = []
@@ -195,12 +306,6 @@ def get_exclusive_masks(pred: jax.Array, threshold: float | None=None) -> dict[M
         exclusive_mask = mask.copy()
         for other_mask in exclusive_masks + complete_masks[i + 1 :]:
             exclusive_mask = substract_mask(exclusive_mask, other_mask)
-        #
-        # for j, other_mask in enumerate(exclusicomplete_masks):
-        #     if j < i:
-        #         exclusive_mask = substract_mask(exclusive_mask, exclusive_masks[j])
-        #     elif j > i:
-        #         exclusive_mask = substract_mask(exclusive_mask, other_mask)
 
         exclusive_masks.append(exclusive_mask)
 

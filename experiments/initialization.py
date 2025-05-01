@@ -56,7 +56,7 @@ def initialize(
         assert target is not None, "target must be provided for copy mode"
         return target.copy()
     elif mode == "zeros":
-        return jnp.zeros(shape)
+        return jnp.zeros(shape) + 1e-6
     else:
         raise ValueError(f"Unknown initialization mode: {mode}")
 

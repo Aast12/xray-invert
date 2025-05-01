@@ -4,7 +4,7 @@ import dm_pix as dmp
 
 
 def dmp_metric(fn, a, b, **kwargs):
-    return fn(jnp.expand_dims(a, axis=2), jnp.expand_dims(b, axis=2), **kwargs).item()
+    return fn(jnp.expand_dims(a, axis=2), jnp.expand_dims(b, axis=2), **kwargs)
 
 
 # @jax.jit
