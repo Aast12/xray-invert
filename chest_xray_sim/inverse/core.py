@@ -205,6 +205,7 @@ def segmentation_optimize(
 
     long_step = time.time()
 
+    # with jax.profiler.trace("/Volumes/T7/tmp/jax-trace", create_perfetto_link=True):
     for step in range(n_steps):
         st = time.time()
         if step > 2 and jnp.abs(losses[-1] - losses[-2]) < eps:

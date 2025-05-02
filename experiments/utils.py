@@ -254,7 +254,7 @@ def dmp_metric(fn, a, b):
 def experiment_args(**arguments):
     parser = argparse.ArgumentParser()
     for arg, default in arguments.items():
-        parser.add_argument(f"--{arg}", type=str, default=default)
+        parser.add_argument(f"--{arg}", type=type(default), default=default)
 
     def parse_args():
         return parser.parse_args()

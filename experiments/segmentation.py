@@ -63,6 +63,7 @@ def forward(image, weights):
     x = ops.range_normalize(x)
     x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
     x = ops.clipping(x)
+
     return x
 
 
@@ -199,12 +200,8 @@ def extract_region_value_ranges(
     exclusive_mask_labels, exclusive_masks = batch_get_exclusive_masks(
         segmentation, threshold
     )
-
-    print("exc masks shape: ", exclusive_masks.shape)
-    print("images shape: ", images.shape)
-
     merged_masks = jnp.sum(exclusive_masks, axis=1)
-    print("merged masks shape", merged_masks.shape)
+
     # TODO: assumes hard masks (not-None threshold)
     merged_masks = jnp.clip(merged_masks, 0, 1)
 
@@ -224,26 +221,60 @@ def extract_region_value_ranges(
         max_values = map_range(
             max_values, min_masked_values, max_masked_values, 0.0, collimated_area_bound
         )
-        jax.debug.print(
-            "(remapped )region: {l}, min: {x}, max: {y}",
-            l=region_id,
-            x=min_values,
-            y=max_values,
-        )
-        jax.debug.print(
-            "means: {x}, {y}",
-            x=min_values.mean(),
-            y=max_values.mean(),
-        )
+        # jax.debug.print(
+        #     "(remapped )region: {l}, min: {x}, max: {y}",
+        #     l=region_id,
+        #     x=min_values,
+        #     y=max_values,
+        # )
+        # jax.debug.print(
+        #     "means: {x}, {y}",
+        #     x=min_values.mean(),
+        #     y=max_values.mean(),
+        # )
 
         region_ranges[region_id] = jnp.array([min_values.mean(), max_values.mean()])
-
-    # visualize_segmentation(images, merged_masks, exclusive_masks, regions)
 
     return (regions, jnp.stack(list(region_ranges.values())))
 
 
-REDO = False
+@jax.jit
+def segmentation_sq_penalty_broad(
+    txm: Float[Array, "batch height width"],
+    segmentation: Float[Array, "batch reduced_labels height width"],
+    value_ranges: Float[Array, "reduced_labels 2"],
+) -> Float[Array, "reduced_labels"]:
+    segmentation_penalty = 0
+
+    penalties = jnp.ones(value_ranges.shape[0])
+
+    # TODO: possibly improve by making broadcast operations
+    for mask_id, val_range in enumerate(value_ranges):
+        mask = segmentation[:, mask_id]
+        min_val, max_val = val_range
+
+        region_values = txm * mask
+        region_size = jnp.sum(mask, axis=(-2, -1))
+
+        below_min = jnp.maximum(0.0, min_val - region_values) ** 2
+        above_max = jnp.maximum(0.0, region_values - max_val) ** 2
+
+        region_penalty = jnp.sum(
+            (below_min + above_max) / (jnp.expand_dims(region_size, (1, 2)) + 1e6)
+        )
+        penalties = penalties.at[mask_id].set(region_penalty)
+        # segmentation_penalty += region_penalty
+
+    return penalties
+
+
+@jax.jit
+def segmentation_sq_penalty(
+    txm: Float[Array, "batch height width"],
+    segmentation: Float[Array, "batch reduced_labels height width"],
+    value_ranges: Float[Array, "reduced_labels 2"],
+):
+    return jnp.sum(segmentation_sq_penalty_broad(txm, segmentation, value_ranges))
 
 
 def segmentation_loss(
@@ -273,84 +304,45 @@ def segmentation_loss(
         tv_factor: Weight for total variation regularization
         prior_weight: Weight for anatomical priors
     """
-    global REDO
     mse = metrics.mse(pred, target)
     tv = metrics.total_variation(txm)
-
-    segmentation_penalty = 0
-
-    if not REDO:
-        # TODO: may be optimized by doing array operations at once and/or parallel
-        #
-        region_values: Float[Array, "batch reduced_label height width"] = (
-            jnp.expand_dims(txm, axis=1) * segmentation
-        )
-
-        # TODO: assumes a hard mask (not-None threshold)
-        region_size = jnp.sum(segmentation, axis=(-2, -1))
-
-        exp_value_ranges = value_ranges.reshape(1, -1, 1, 1, 2)
-
-        below_min = jnp.maximum(0.0, exp_value_ranges[..., 0] - region_values) ** 2
-        above_max = jnp.maximum(0.0, exp_value_ranges[..., 1] - region_values) ** 2
-
-        jax.debug.print(
-            "first below_min: {x} \n above max: {y}",
-            x=below_min.sum(axis=(-2, -1)),
-            y=above_max.sum(axis=(-2, -1)),
-        )
-
-        # region_penalty = jnp.sum(below_min + above_max, axis=(-2, -1))
-
-        # segmentation_penalty = jnp.sum(region_penalty / (region_size + 1e-6))
-
-    below_min_s = jnp.ones(value_ranges.shape[0]) if not REDO else None
-    above_max_s = jnp.ones(value_ranges.shape[0]) if not REDO else None
-
-    for mask_id, val_range in enumerate(value_ranges):
-        mask = segmentation[:, mask_id]
-        min_val, max_val = val_range
-
-        region_values = txm * mask
-        region_size = jnp.sum(mask)
-
-        below_min = jnp.maximum(0.0, min_val - region_values) ** 2
-        above_max = jnp.maximum(0.0, region_values - max_val) ** 2
-
-        if not REDO:
-            below_min_s = below_min_s.at[mask_id].set(jnp.sum(below_min))
-            above_max_s = above_max_s.at[mask_id].set(jnp.sum(above_max))
-
-        region_penalty = jnp.sum(below_min + above_max)
-
-        segmentation_penalty += region_penalty / (region_size + 1e-6)
-
-    if not REDO:
-        jax.debug.print(
-            "second below_min: {x} \n above max: {y}", x=below_min_s, y=above_max_s
-        )
-        REDO = True
+    segmentation_penalty = segmentation_sq_penalty(txm, segmentation, value_ranges)
 
     return mse + tv_factor * tv + prior_weight * segmentation_penalty
 
 
-def batch_evaluation(images, txm, weights):
+def batch_evaluation(images, txm, pred, segmentation):
     """
     Evaluate the model on a batch of images and segmentations.
     """
-    # Forward pass
-    pred = forward(txm, weights)
 
     # Calculate metrics
-    mse = metrics.mse(pred, images)
     psnr = metrics.psnr(pred, images)
     ssim = metrics.ssim(pred, images)
-
-    print("types:", type(mse), type(psnr), type(ssim))
-    print("metrics shapes:", mse.shape, psnr.shape, ssim.shape)
+    penalties = segmentation_sq_penalty_broad(txm, segmentation, value_ranges)
 
     # Log metrics
-    wandb.log({"mse": mse, "psnr": psnr, "ssim": ssim})
+    wandb.log(
+        {
+            "psnr": {
+                "mean": psnr.mean(),
+                "std": psnr.std(),
+                "min": psnr.min(),
+                "max": psnr.max(),
+            },
+            "ssim": {
+                "mean": ssim.mean(),
+                "std": ssim.std(),
+                "min": ssim.min(),
+                "max": ssim.max(),
+            },
+            "penalies": {
+                "sum": penalties.sum(),
+                "mean": penalties.mean(),
+                "data": penalties,
+            },
+        }
+    )
 
 
 def segmentation_projection(txm_state, weights_state, segmentation):
@@ -485,11 +477,8 @@ def run_processing(
     log_image(f"recovered_processed_{rand_index}", recovered_image)
 
     try:
-        batch_evaluation(
-            images,
-            txm,
-            weights,
-        )
+        pred = forward(txm, weights)
+        batch_evaluation(images, txm, pred, segmentations)
     except Exception as e:
         print("Error during batch evaluation:", e)
         # wandb.log({"batch_evaluation_error": str(e)})
@@ -595,14 +584,13 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
     )
 
-    # Set up W&B configuration
     run_init = dict(
         project=PROJECT,
         notes=f"Segmentation-guided optimization with {FWD_DESC}",
         tags=TAGS,
     )
 
-    # Define hyperparameter sweep
+    # Define hyperparameter sweep search space
     sweep_config = {
         "name": SWEEP_NAME,
         "method": "bayes",
@@ -620,7 +608,7 @@ if __name__ == "__main__":
                             ["uniform", "normal"], [(0.01, 0.99), (0.2, 0.8)]
                         )
                     ),
-                    ("zeros", None),
+                    # ("zeros", None),
                     ("target", None),
                 ]
             },
