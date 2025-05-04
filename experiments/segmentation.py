@@ -9,7 +9,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import torch
-from jaxtyping import Array, Float, Integer
+from torch import Tensor
+from jaxtyping import Array, Float, Scalar
 import wandb
 
 from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
@@ -30,7 +31,6 @@ from utils import basic_loss_logger, log_image, experiment_args
 import initialization as init
 import projections as proj
 import matplotlib.pyplot as plt
-import time
 
 
 DEBUG = True
@@ -50,7 +50,14 @@ args_spec = experiment_args(
 )
 
 
-def map_range(x, src_min, src_max, dst_min, dst_max):
+@jax.jit
+def map_range(
+    x: Float[Array, "*dims"],
+    src_min: Scalar,
+    src_max: Scalar,
+    dst_min: Scalar,
+    dst_max: Scalar,
+):
     return (x - src_min) / (src_max - src_min) * (dst_max - dst_min) + dst_min
 
 
@@ -68,9 +75,9 @@ def forward(image, weights):
 
 
 def visualize_segmentation(
-    images: jax.Array,
-    merged_masks: jax.Array,
-    exclusive_masks: jax.Array,
+    images: Array,
+    merged_masks: Array,
+    exclusive_masks: Array,
     regions: list[MaskGroupsT] = list(MASK_GROUPS),
 ):
     _, ax = plt.subplots(images.shape[0], len(regions) + 2, figsize=(12, 6))
@@ -112,9 +119,9 @@ def visualize_segmentation(
 
 
 def visualize_segementation_ranges(
-    images: jax.Array,
-    merged_masks: jax.Array,
-    exclusive_masks: dict[str, jax.Array],
+    images: Array,
+    merged_masks: Array,
+    exclusive_masks: dict[str, Array],
     region_ranges: dict[MaskGroupsT, tuple[float, float]],
     regions: list[MaskGroupsT] = list(MASK_GROUPS),
     collimated_area_bound=0.8,
@@ -175,8 +182,8 @@ def visualize_segementation_ranges(
 
 
 def extract_region_value_ranges(
-    images: jax.Array,
-    segmentation: jax.Array,
+    images: Array,
+    segmentation: Array,
     regions: list[MaskGroupsT] | MaskGroupsT,
     threshold: float = 0.6,
     collimated_area_bound: float = 0.8,
@@ -221,17 +228,6 @@ def extract_region_value_ranges(
         max_values = map_range(
             max_values, min_masked_values, max_masked_values, 0.0, collimated_area_bound
         )
-        # jax.debug.print(
-        #     "(remapped )region: {l}, min: {x}, max: {y}",
-        #     l=region_id,
-        #     x=min_values,
-        #     y=max_values,
-        # )
-        # jax.debug.print(
-        #     "means: {x}, {y}",
-        #     x=min_values.mean(),
-        #     y=max_values.mean(),
-        # )
 
         region_ranges[region_id] = jnp.array([min_values.mean(), max_values.mean()])
 
@@ -239,31 +235,40 @@ def extract_region_value_ranges(
 
 
 @jax.jit
+def compute_single_mask_penalty(
+    mask_id: int,
+    mask: Float[Array, "batch height width"],
+    value_range: Float[Array, " 2"],
+    txm: Float[Array, "batch height width"],
+    penalties: Float[Array, " reduced_labels"],
+) -> Float[Array, " reduced_labels"]:
+    min_val, max_val = value_range
+
+    region_values = txm * mask
+    region_size = jnp.sum(mask, axis=(-2, -1))
+
+    below_min = jnp.maximum(0.0, min_val - region_values) ** 2
+    above_max = jnp.maximum(0.0, region_values - max_val) ** 2
+
+    region_penalty = jnp.sum(
+        (below_min + above_max) / (jnp.expand_dims(region_size, (1, 2)) + 1e6)
+    )
+    return penalties.at[mask_id].set(region_penalty)
+
+
+@jax.jit
 def segmentation_sq_penalty_broad(
     txm: Float[Array, "batch height width"],
     segmentation: Float[Array, "batch reduced_labels height width"],
     value_ranges: Float[Array, "reduced_labels 2"],
-) -> Float[Array, "reduced_labels"]:
-    segmentation_penalty = 0
-
+) -> Float[Array, " reduced_labels"]:
     penalties = jnp.ones(value_ranges.shape[0])
 
     # TODO: possibly improve by making broadcast operations
     for mask_id, val_range in enumerate(value_ranges):
-        mask = segmentation[:, mask_id]
-        min_val, max_val = val_range
-
-        region_values = txm * mask
-        region_size = jnp.sum(mask, axis=(-2, -1))
-
-        below_min = jnp.maximum(0.0, min_val - region_values) ** 2
-        above_max = jnp.maximum(0.0, region_values - max_val) ** 2
-
-        region_penalty = jnp.sum(
-            (below_min + above_max) / (jnp.expand_dims(region_size, (1, 2)) + 1e6)
+        penalties = compute_single_mask_penalty(
+            mask_id, segmentation[:, mask_id], val_range, txm, penalties
         )
-        penalties = penalties.at[mask_id].set(region_penalty)
-        # segmentation_penalty += region_penalty
 
     return penalties
 
@@ -311,17 +316,20 @@ def segmentation_loss(
     return mse + tv_factor * tv + prior_weight * segmentation_penalty
 
 
-def batch_evaluation(images, txm, pred, segmentation):
+def batch_evaluation(
+    images: Float[Array, "batch height width"],
+    txm: Float[Array, "batch height width"],
+    pred: Float[Array, "batch height width"],
+    segmentation: Float[Array, "batch labels height width"],
+):
     """
     Evaluate the model on a batch of images and segmentations.
     """
 
-    # Calculate metrics
     psnr = metrics.psnr(pred, images)
     ssim = metrics.ssim(pred, images)
     penalties = segmentation_sq_penalty_broad(txm, segmentation, value_ranges)
 
-    # Log metrics
     wandb.log(
         {
             "psnr": {
@@ -374,8 +382,8 @@ def save_image(img, path: str, bits=8):
 
 
 def run_processing(
-    images_batch: Float[torch.Tensor, "batch height width"],
-    masks_batch: Float[torch.Tensor, "batch labels height width"],
+    images_batch: Float[Tensor, "batch height width"],
+    masks_batch: Float[Tensor, "batch labels height width"],
     meta_batch: list[ChexpertMeta],
     value_ranges: Float[Array, "reduced_labels 2"],
     run_init={},
@@ -385,8 +393,8 @@ def run_processing(
     run = wandb.init(**run_init)
     hyperparams = run.config
 
-    print("images batch info:", type(images_batch), images_batch.type)
-    print("masks batch info:", type(masks_batch), masks_batch.type)
+    print("images batch info:", type(images_batch), images_batch.shape)
+    print("masks batch info:", type(masks_batch), masks_batch.shape)
 
     wandb.log({"priors": value_ranges})
 
@@ -538,7 +546,6 @@ def get_priors(segmentation_cache_dir: str):
         real_tm_images, real_tm_segmentations, list(MASK_GROUPS)
     )
     print("value ranges:", value_ranges)
-    print("expanded val ranges:", value_ranges.reshape(1, -1, 1, 1, 2))
 
     del segmentation_model
 
@@ -598,8 +605,9 @@ if __name__ == "__main__":
         "parameters": {
             "lr": {"min": 5e-3, "max": 5e-2},
             "n_steps": {"values": [300, 600, 1200]},
-            "total_variation": {"min": 0.0, "max": 0.5},
-            "prior_weight": {"min": 0.0, "max": 0.2},
+            # regularization params, ensure they have some influence in loss
+            "total_variation": {"min": 0.1, "max": 0.5},
+            "prior_weight": {"min": 0.1, "max": 0.5},
             "PRNGKey": {"values": [0, 42]},
             "tm_init_params": {
                 "values": [

@@ -1,6 +1,8 @@
+from functools import partial
 import jax
 import jax.numpy as jnp
 import dm_pix as dmp
+from jaxtyping import Float, Array
 
 
 def dmp_metric(fn, a, b, **kwargs):
@@ -8,7 +10,7 @@ def dmp_metric(fn, a, b, **kwargs):
 
 
 @jax.jit
-def mse(pred, target):
+def mse(pred: Float[Array, "*dims"], target: Float[Array, "*dims"]):
     return jnp.mean((pred - target) ** 2)
 
 
@@ -26,9 +28,11 @@ def total_variation(image):
 #
 
 
-def ssim(pred, target, max_val=1.0):
+@partial(jax.jit, static_argnames=["max_val"])
+def ssim(pred: Float[Array, "*dims"], target: Float[Array, "*dims"], max_val=1.0):
     return dmp_metric(dmp.ssim, pred, target, max_val=max_val)
 
 
-def psnr(pred, target):
+@jax.jit
+def psnr(pred: Float[Array, "*dims"], target: Float[Array, "*dims"]):
     return dmp_metric(dmp.psnr, pred, target)

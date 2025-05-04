@@ -1,16 +1,21 @@
+from functools import partial
+
+import dm_pix as dmp
 import jax
 import jax.numpy as jnp
-import dm_pix as dmp
 from dm_pix import gaussian_blur
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, Scalar
+
+Image = Float[Array, "*batch rows cols"]
 
 
-# @partial(jax.jit, static_argnums=(1,))
-def negative_log(image: Float[Array, "rows cols"], eps=1e-6):
+@partial(jax.jit, static_argnums=(1,))
+def negative_log(image: Image, eps=1e-6):
     return -jnp.log(jnp.maximum(image, eps))
 
 
-def windowing(image, window_center, window_width, gamma):
+@jax.jit
+def windowing(image: Image, window_center: Scalar, window_width: Scalar, gamma: Scalar):
     x = image
     x = (x - window_center) / window_width
     x = jax.nn.sigmoid(x) ** gamma
@@ -18,15 +23,17 @@ def windowing(image, window_center, window_width, gamma):
     return x
 
 
-def low_pass(image, sigma):
+@jax.jit
+def low_pass(image: Image, sigma: float):
     x = jnp.expand_dims(image, axis=2)
     kernel_size = 2 * sigma
     blurred = gaussian_blur(x, sigma, kernel_size, padding="same")
 
-    return (x - blurred)
+    return x - blurred
 
 
-def unsharp_masking_alt(image, sigma, enhance_factor):
+@jax.jit
+def unsharp_masking_alt(image: Image, sigma: float, enhance_factor: float):
     x = jnp.expand_dims(image, axis=2)
     kernel_size = 2 * sigma
     blurred = gaussian_blur(x, sigma, kernel_size, padding="same")
@@ -36,7 +43,8 @@ def unsharp_masking_alt(image, sigma, enhance_factor):
 
     return x.squeeze()
 
-def unsharp_masking(image, sigma, enhance_factor):
+
+def unsharp_masking(image: Image, sigma: float, enhance_factor: float):
     x = jnp.expand_dims(image, axis=2)
     kernel_size = 2 * sigma
     blurred = gaussian_blur(x, sigma, kernel_size, padding="SAME")
@@ -48,18 +56,18 @@ def unsharp_masking(image, sigma, enhance_factor):
     return x.squeeze()
 
 
-# @jax.jit
+@jax.jit
 def clipping(image):
     return jnp.clip(image, 0.0, 1.0)
 
 
-# @jax.jit
-def range_normalize(image):
+@jax.jit
+def range_normalize(image: Image):
     x = image
     return (x - x.min()) / (x.max() - x.min())
 
 
-# @jax.jit
-def max_normalize(image):
+@jax.jit
+def max_normalize(image: Image):
     x = image
     return x / x.max()
