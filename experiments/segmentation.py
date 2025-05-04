@@ -27,7 +27,7 @@ from chest_xray_sim.data.segmentation import (
 )
 from chest_xray_sim.data.utils import read_image
 from chest_xray_sim.inverse.core import segmentation_optimize
-from utils import basic_loss_logger, log_image, experiment_args
+from utils import basic_loss_logger, log_image, experiment_args, map_range
 import initialization as init
 import projections as proj
 import matplotlib.pyplot as plt
@@ -50,17 +50,6 @@ args_spec = experiment_args(
 )
 
 
-@jax.jit
-def map_range(
-    x: Float[Array, "*dims"],
-    src_min: Scalar,
-    src_max: Scalar,
-    dst_min: Scalar,
-    dst_max: Scalar,
-):
-    return (x - src_min) / (src_max - src_min) * (dst_max - dst_min) + dst_min
-
-
 def forward(image, weights):
     """Forward processing function that converts transmission maps to processed X-rays"""
     x = ops.negative_log(image)
@@ -72,113 +61,6 @@ def forward(image, weights):
     x = ops.clipping(x)
 
     return x
-
-
-def visualize_segmentation(
-    images: Array,
-    merged_masks: Array,
-    exclusive_masks: Array,
-    regions: list[MaskGroupsT] = list(MASK_GROUPS),
-):
-    _, ax = plt.subplots(images.shape[0], len(regions) + 2, figsize=(12, 6))
-    last = len(regions) + 1
-
-    # get collimated area by getting value range in segmented areas
-    max_masked_values = jnp.max(images * merged_masks, axis=(1, 2))
-    min_masked_values = jnp.min(images * merged_masks, axis=(1, 2))
-
-    for j, region_id in enumerate(regions):
-        mask = exclusive_masks[:, j]  # TODO: assumes full list MASK_GROUPS
-
-        region_values = images * mask
-        for i, mv in enumerate(region_values):
-            if j == 0:
-                ax[i, 0].imshow(images[i], cmap="gray")
-
-            ax[i, j + 1].imshow(mv, cmap="jet", vmin=0, vmax=1)
-            ax[i, 0].axis("off")
-            ax[i, j + 1].axis("off")
-            mm = mv[mv > 0]
-            ax[i, last].hist(mm.flatten(), bins=50, alpha=0.3, label=region_id)
-            if j == 0:
-                ax[i, last].hist(images[i].flatten(), bins=50, alpha=0.3, label="total")
-
-            ax[i, last].axvline(
-                min_masked_values[i].item(), color="red", linestyle="--"
-            )
-            ax[i, last].axvline(
-                max_masked_values[i].item(), color="red", linestyle="--"
-            )
-
-            ax[i, last].legend()
-
-    plt.legend()
-    plt.tight_layout()
-
-    plt.show()
-
-
-def visualize_segementation_ranges(
-    images: Array,
-    merged_masks: Array,
-    exclusive_masks: dict[str, Array],
-    region_ranges: dict[MaskGroupsT, tuple[float, float]],
-    regions: list[MaskGroupsT] = list(MASK_GROUPS),
-    collimated_area_bound=0.8,
-):
-    max_masked_values = jnp.max(images * merged_masks, axis=(1, 2))
-    min_masked_values = jnp.min(images * merged_masks, axis=(1, 2))
-
-    _, ax = plt.subplots(len(images), 2, figsize=(12, 6))
-
-    colors: dict[MaskGroupsT, str] = {
-        "bone": "blue",
-        "lung": "green",
-        "soft": "red",
-    }
-
-    for i, image in enumerate(images):
-        ax[i, 0].imshow(image, cmap="gray")
-
-        target_values = image * merged_masks[i]
-        target_values = map_range(
-            target_values,
-            min_masked_values[i],
-            max_masked_values[i],
-            0.0,
-            collimated_area_bound,
-        )
-
-        ax[i, 1].hist(
-            target_values.flatten(),
-            bins=50,
-            alpha=0.3,
-            label="total",
-            color="gray",
-        )
-
-        for region_id in regions:
-            min_val, max_val = region_ranges[region_id]
-            print("region:", region_id, min_val, max_val)
-            region_values = target_values * exclusive_masks[region_id]
-            ax[i, 1].hist(
-                region_values[region_values > 0].flatten(),
-                bins=50,
-                alpha=0.3,
-                label=region_id,
-                color=colors.get(region_id, "gray"),
-            )
-            ax[i, 1].axvline(
-                min_val, color=colors.get(region_id, "yellow"), linestyle="--"
-            )
-            ax[i, 1].axvline(
-                max_val, color=colors.get(region_id, "yellow"), linestyle="--"
-            )
-            ax[i, 1].legend()
-
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
 
 
 def extract_region_value_ranges(
@@ -257,11 +139,11 @@ def compute_single_mask_penalty(
 
 
 @jax.jit
-def segmentation_sq_penalty_broad(
+def segmentation_sq_penalty(
     txm: Float[Array, "batch height width"],
     segmentation: Float[Array, "batch reduced_labels height width"],
     value_ranges: Float[Array, "reduced_labels 2"],
-) -> Float[Array, " reduced_labels"]:
+):
     penalties = jnp.ones(value_ranges.shape[0])
 
     # TODO: possibly improve by making broadcast operations
@@ -270,16 +152,7 @@ def segmentation_sq_penalty_broad(
             mask_id, segmentation[:, mask_id], val_range, txm, penalties
         )
 
-    return penalties
-
-
-@jax.jit
-def segmentation_sq_penalty(
-    txm: Float[Array, "batch height width"],
-    segmentation: Float[Array, "batch reduced_labels height width"],
-    value_ranges: Float[Array, "reduced_labels 2"],
-):
-    return jnp.sum(segmentation_sq_penalty_broad(txm, segmentation, value_ranges))
+    return jnp.sum(penalties)
 
 
 def segmentation_loss(
@@ -311,6 +184,7 @@ def segmentation_loss(
     """
     mse = metrics.mse(pred, target)
     tv = metrics.total_variation(txm)
+
     segmentation_penalty = segmentation_sq_penalty(txm, segmentation, value_ranges)
 
     return mse + tv_factor * tv + prior_weight * segmentation_penalty
@@ -357,13 +231,17 @@ def segmentation_projection(txm_state, weights_state, segmentation):
     """
     Project transmission map values based on segmentation information.
     Uses softer constraints with confidence-weighted projections.
+
+    Args:
+        txm_state: Transmission mp state
+        weights_state: Weights state - parameters of the forward model
     """
-    # Basic projections first
+    # General constraints
     new_txm_state = optax.projections.projection_hypercube(txm_state)
     new_weights_state = optax.projections.projection_non_negative(weights_state)
 
-    # Apply parameter constraints
-    new_weights_state = proj.project_spec(
+    # Apply constraints on image processing parameters
+    new_weights_state = proj.projection_spec(
         new_weights_state,
         {
             "low_sigma": proj.box(0.1, 10),
@@ -393,9 +271,6 @@ def run_processing(
     run = wandb.init(**run_init)
     hyperparams = run.config
 
-    print("images batch info:", type(images_batch), images_batch.shape)
-    print("masks batch info:", type(masks_batch), masks_batch.shape)
-
     wandb.log({"priors": value_ranges})
 
     images = jnp.array(images_batch.cpu().numpy()).squeeze(1)
@@ -403,8 +278,6 @@ def run_processing(
     seg_labels, segmentations = batch_get_exclusive_masks(
         jnp.array(masks_batch.cpu().numpy()), segmentation_th
     )
-
-    print("segmentations shape", segmentations.shape)
 
     rand_index = np.random.randint(0, images.shape[0])
 

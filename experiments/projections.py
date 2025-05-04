@@ -16,7 +16,7 @@ def box(lower_bound, upper_bound):
     )
 
 
-def project_spec(state: dict[str, Any], spec: dict[str, Callable]):
+def projection_spec(state: dict[str, Any], spec: dict[str, Callable]):
     for key, projection in spec.items():
         if key not in state:
             raise ValueError(f"Key {key} not found in state.")

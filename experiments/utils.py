@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from cv2.typing import MatLike
-from jaxtyping import Float, Array
+from jaxtyping import Float, Array, Scalar
 from skimage.transform import resize
 
 import wandb
@@ -17,6 +17,17 @@ import chest_xray_sim.inverse.operators as ops
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
 
+
+@jax.jit
+def map_range(
+    x: Float[Array, "*dims"],
+    src_min: Scalar,
+    src_max: Scalar,
+    dst_min: Scalar,
+    dst_max: Scalar,
+):
+    "Maps the range of x from [src_min, src_max] to [dst_min, dst_max]."
+    return (x - src_min) / (src_max - src_min) * (dst_max - dst_min) + dst_min
 
 def get_random(
     key,
