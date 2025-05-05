@@ -88,7 +88,7 @@ def substract_mask(
     mask0,
     exclude_mask,
 ):
-    if isinstance(mask0, jax.Array):
+    if isinstance(mask0, Array):
         return jnp.bitwise_xor(mask0, mask0 * exclude_mask)
 
     return torch.bitwise_xor(mask0, mask0 * exclude_mask)
@@ -115,7 +115,7 @@ def _join_masks(
     )
 
     if threshold is not None:
-        if isinstance(pred, jax.Array):
+        if isinstance(pred, Array):
             aggregated = jnp.where(aggregated < threshold, 0, 1)
         else:
             aggregated[aggregated < threshold] = 0
@@ -134,26 +134,24 @@ def _batch_join_masks(
     pred: Float[Tensor, "batch labels height width"],
     threshold=...,
 ) -> Float[Tensor, "batch labels height width"]: ...
-
-
 def _batch_join_masks(
     pred,
     threshold: float | None = None,
-):
-    aggregated = (
-        torch.sigmoid(pred.sum(dim=1, keepdim=True))
-        if isinstance(pred, torch.Tensor)
-        else jax.nn.sigmoid(pred.sum(axis=1, keepdims=True))
-    )
-
-    if threshold is not None:
-        if isinstance(pred, jax.Array):
+) -> Array | Tensor:
+    if isinstance(pred, Array):
+        aggregated = jax.nn.sigmoid(pred.sum(axis=1, keepdims=True))
+        if threshold is not None:
             aggregated = jnp.where(aggregated < threshold, 0, 1)
-        else:
+        return aggregated
+    elif isinstance(pred, Tensor):
+        aggregated = torch.sigmoid(pred.sum(dim=1, keepdim=True))
+        if threshold is not None:
             aggregated[aggregated < threshold] = 0
             aggregated[aggregated >= threshold] = 1
 
-    return aggregated
+        return aggregated
+
+    raise ValueError(f"Unsupported type {type(pred)}. Expected Array or Tensor.")
 
 
 class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
@@ -178,17 +176,17 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
     @classmethod
     def get_mask(
         cls,
-        pred: torch.Tensor | jax.Array,
+        pred: torch.Tensor | Array,
         label: SegmentationLabelsT,
         threshold: float | None = None,
-    ) -> torch.Tensor | jax.Array:
+    ) -> torch.Tensor | Array:
         if threshold is not None:
-            if isinstance(pred, jax.Array):
+            if isinstance(pred, Array):
                 pred = jnp.where(jax.nn.sigmoid(pred) < threshold, 0, 1)
             else:
                 pred = torch.where(torch.sigmoid(pred) < threshold, 0, 1)
 
-        if isinstance(pred, jax.Array):
+        if isinstance(pred, Array):
             return pred[jnp.array(cls.targets_dict[label])]
         return pred[cls.targets_dict[label]]
 
@@ -196,22 +194,20 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
 @overload
 def get_group_mask(
     pred: Float[Array, "batch_size num_clases height width"],
-    group,
+    group: MaskGroupsT,
     threshold=...,
 ) -> Float[Array, "batch_size height width"]: ...
 @overload
 def get_group_mask(
     pred: Float[Tensor, "batch_size num_clases height width"],
-    group,
+    group: MaskGroupsT,
     threshold=...,
 ) -> Float[Tensor, "batch_size height width"]: ...
-
-
 def get_group_mask(
     pred,
-    group: MaskGroupsT,
-    threshold=None,
-):
+    group,
+    threshold: float | None = None,
+) -> ArrayT:
     """
     Get the group mask for the given group from the prediction.
 
@@ -223,22 +219,32 @@ def get_group_mask(
     labels = MASK_GROUPS_LABELS[group]
 
     q = [ChestSegmentation.targets_dict[label] for label in labels]
-    if isinstance(pred, jax.Array):
+    if isinstance(pred, Array):
         q = jnp.array(q)
 
-    return _join_masks(
-        jax.nn.sigmoid(pred[q])
-        if isinstance(pred, jax.Array)
-        else torch.sigmoid(pred[q]),
-        threshold,
-    )
+    if isinstance(pred, Array):
+        return _join_masks(jax.nn.sigmoid(pred[q]), threshold)
+    else:
+        return _join_masks(torch.sigmoid(pred[q]), threshold)
 
 
+@overload
+def batched_get_group_mask(
+    pred: Float[Tensor, "batch labels height width"],
+    group,
+    threshold=...,
+) -> Float[Tensor, "batch labels height width"]: ...
+@overload
 def batched_get_group_mask(
     pred: Float[Array, "batch labels height width"],
+    group,
+    threshold=...,
+) -> Float[Array, "batch labels height width"]: ...
+def batched_get_group_mask(
+    pred,
     group: MaskGroupsT,
     threshold: float | None = None,
-) -> Float[Array, "batch labels height width"]:  # TODO: check shape here
+) -> ArrayT:  # TODO: check shape here
     """
     Get the group mask for the given group from the prediction.
 
@@ -250,15 +256,13 @@ def batched_get_group_mask(
     labels = MASK_GROUPS_LABELS[group]
 
     q = [ChestSegmentation.targets_dict[label] for label in labels]
-    if isinstance(pred, jax.Array):
+    if isinstance(pred, Array):
         q = jnp.array(q)
 
-    return _batch_join_masks(
-        jax.nn.sigmoid(pred[:, q])
-        if isinstance(pred, jax.Array)
-        else torch.sigmoid(pred[:, q]),
-        threshold,
-    )
+    if isinstance(pred, Array):
+        return _batch_join_masks(jax.nn.sigmoid(pred[:, q]), threshold)
+    else:
+        return _batch_join_masks(torch.sigmoid(pred[:, q]), threshold)
 
 
 def batch_get_exclusive_masks(
@@ -297,7 +301,7 @@ def batch_get_exclusive_masks(
 def get_exclusive_masks(
     pred: Float[Array, "batch labels height width"],
     threshold: float | None = None,
-) -> dict[MaskGroupsT, jax.Array]:
+) -> dict[MaskGroupsT, Array]:
     print("getting exclusive masks", pred.shape)
     complete_masks = [get_group_mask(pred, group, threshold) for group in MASK_GROUPS]
 
@@ -432,8 +436,8 @@ if __name__ == "__main__":
         ax[i].set_title(label)
         ax[i].axis("off")
 
-    lung_mask = model.get_group_mask(pred, "lung", threshold=None)
-    bone_mask = model.get_group_mask(pred, "bone", threshold=None)
+    lung_mask = get_group_mask(pred, "lung", threshold=None)
+    bone_mask = get_group_mask(pred, "bone", threshold=None)
 
     fig, ax = plt.subplots(1, 2, figsize=(5, 5))
     a = ax[0].imshow(lung_mask)

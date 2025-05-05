@@ -16,6 +16,7 @@ dependencies = [
     "wheel>=0.45.1",
     "matplotlib",
     "torchvision",
+    "opencv-python>=4.11.0.86",
 ]
 
 [tool.uv.sources]

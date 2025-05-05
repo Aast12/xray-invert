@@ -1,7 +1,5 @@
-from dataclasses import field, dataclass, MISSING
 import itertools
 import os
-import argparse
 
 import cv2
 import jax
@@ -10,7 +8,8 @@ import numpy as np
 import optax
 import torch
 from torch import Tensor
-from jaxtyping import Array, Float, Scalar
+from jaxtyping import Array, Float, PyTree
+from typing import TypedDict
 import wandb
 
 from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
@@ -21,8 +20,6 @@ from chest_xray_sim.data.segmentation import (
     MASK_GROUPS,
     ChestSegmentation,
     batch_get_exclusive_masks,
-    get_exclusive_masks,
-    get_group_mask,
     MaskGroupsT,
 )
 from chest_xray_sim.data.utils import read_image
@@ -30,13 +27,20 @@ from chest_xray_sim.inverse.core import segmentation_optimize
 from utils import basic_loss_logger, log_image, experiment_args, map_range
 import initialization as init
 import projections as proj
-import matplotlib.pyplot as plt
 
 
 DEBUG = True
 
-b_get_group_mask = jax.vmap(get_group_mask, in_axes=(0, None, None))
-b_get_exclusive_masks = jax.vmap(get_exclusive_masks, in_axes=(0, None))
+
+class ForwardParams(TypedDict):
+    low_sigma: float
+    low_enhance_factor: float
+    window_center: float
+    window_width: float
+    gamma: float
+
+TransmissionMapT = Float[Array, "batch height width"]
+WeightsT = PyTree[ForwardParams]
 
 args_spec = experiment_args(
     batch_size=32,
@@ -50,7 +54,7 @@ args_spec = experiment_args(
 )
 
 
-def forward(image, weights):
+def forward(image: TransmissionMapT, weights: WeightsT) -> Float[Array, "*batch rows cols"]:
     """Forward processing function that converts transmission maps to processed X-rays"""
     x = ops.negative_log(image)
     x = ops.windowing(
@@ -64,7 +68,7 @@ def forward(image, weights):
 
 
 def extract_region_value_ranges(
-    images: Array,
+    images: Array,  
     segmentation: Array,
     regions: list[MaskGroupsT] | MaskGroupsT,
     threshold: float = 0.6,
@@ -77,15 +81,12 @@ def extract_region_value_ranges(
         in the collimated area (largest consecutive value area in the histogram). A way to normalize it is
         to take the range from 0 to the max value found in the lungs, that way we can stretch the transmission
         range to a common value, say 60% transmission.
-
-
     """
     if isinstance(regions, str):
         regions = [regions]
 
     region_ranges = {}
 
-    # exclusive_masks = b_get_exclusive_masks(segmentation, threshold)
     exclusive_mask_labels, exclusive_masks = batch_get_exclusive_masks(
         segmentation, threshold
     )
@@ -119,9 +120,9 @@ def extract_region_value_ranges(
 @jax.jit
 def compute_single_mask_penalty(
     mask_id: int,
-    mask: Float[Array, "batch height width"],
+    mask: TransmissionMapT,
     value_range: Float[Array, " 2"],
-    txm: Float[Array, "batch height width"],
+    txm: TransmissionMapT,
     penalties: Float[Array, " reduced_labels"],
 ) -> Float[Array, " reduced_labels"]:
     min_val, max_val = value_range
@@ -156,8 +157,8 @@ def segmentation_sq_penalty(
 
 
 def segmentation_loss(
-    txm: Float[Array, "batch height width"],
-    weights,
+    txm: TransmissionMapT,
+    weights: WeightsT,
     pred: Float[Array, "batch height width"],
     target: Float[Array, "batch height width"],
     segmentation: Float[Array, "batch reduced_labels height width"],
@@ -202,7 +203,7 @@ def batch_evaluation(
 
     psnr = metrics.psnr(pred, images)
     ssim = metrics.ssim(pred, images)
-    penalties = segmentation_sq_penalty_broad(txm, segmentation, value_ranges)
+    penalties = segmentation_sq_penalty(txm, segmentation, value_ranges)
 
     wandb.log(
         {
@@ -227,7 +228,8 @@ def batch_evaluation(
     )
 
 
-def segmentation_projection(txm_state, weights_state, segmentation):
+def segmentation_projection(txm_state: TransmissionMapT,
+                            weights_state: WeightsT, _) -> tuple[TransmissionMapT, WeightsT]:
     """
     Project transmission map values based on segmentation information.
     Uses softer constraints with confidence-weighted projections.
@@ -307,7 +309,9 @@ def run_processing(
 
     txm0 = init.initialize(hyperparams["PRNGKey"], images.shape, **init_params)
 
-    # Initial parameters for the forward model
+    # Initial parameters for the forward model, should yield a proper image processing 
+    # for constant weights
+    # TODO: long-term: automatic DIP parameter selection
     w0 = {
         "low_sigma": 4.0,
         "low_enhance_factor": 0.5,
@@ -316,7 +320,6 @@ def run_processing(
         "gamma": 1.2,
     }
 
-    # Create loss function with configurable weights
     def loss_fn(*args):
         return segmentation_loss(
             *args,
@@ -325,9 +328,10 @@ def run_processing(
             prior_weight=hyperparams["prior_weight"],
         )
 
-    # Run optimization with segmentation guidance
     optimizer = optax.adam(learning_rate=hyperparams["lr"])
-    state, losses = segmentation_optimize(
+
+    # todo: any processing with losses?
+    state, _ = segmentation_optimize(
         target=images,
         txm0=txm0,
         w0=w0,
@@ -415,14 +419,14 @@ def get_priors(segmentation_cache_dir: str):
     real_tm_images = jnp.array(real_tm_data.cpu().numpy()).squeeze(1)
     real_tm_segmentations = jnp.array(real_tm_segmentations.cpu().numpy())
 
-    value_range_labels, value_ranges = extract_region_value_ranges(
+    # TODO: incomplete label forwarding
+    _, value_ranges = extract_region_value_ranges(
         real_tm_images, real_tm_segmentations, list(MASK_GROUPS)
     )
     print("value ranges:", value_ranges)
 
     del segmentation_model
 
-    # TODO: incomplete label forwarding
     return value_ranges
 
 

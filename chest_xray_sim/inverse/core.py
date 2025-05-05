@@ -1,6 +1,5 @@
 import time
-from abc import ABC, abstractmethod
-from typing import Callable, Dict, Generic, List, Optional, Tuple, TypeVar, Union
+from typing import Callable,  Union
 
 import jax
 import jax.numpy as jnp
@@ -69,12 +68,10 @@ def base_optimize(
         loss_value_and_grad = jax.value_and_grad(loss_call, argnums=(0, 1))
         loss, (weight_grads, tx_grads) = loss_value_and_grad(weights, tx_maps, target)
         grads = (tx_grads, weight_grads)
-        # jax.debug.print('weight grads= {w}', w=weight_grads)
 
         updates, new_opt_state = optimizer.update(grads, opt_state)
         updates_txm, updates_weights = updates
 
-        # jax.debug.print('weight updates = {w}', w=updates_weights)
 
         txm_new_state = optax.apply_updates(tx_maps, updates_txm)
         weights_new_state = weights
