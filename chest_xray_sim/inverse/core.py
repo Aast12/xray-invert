@@ -1,5 +1,5 @@
 import time
-from typing import Callable,  Union
+from typing import Callable, Union
 
 import jax
 import jax.numpy as jnp
@@ -37,6 +37,7 @@ def base_optimize(
     lr=0.001,
     n_steps=500,
     loss_logger=None,
+    logger=wandb.log,
     eps=1e-8,
 ) -> OptimizationRetT:
     def loss_call(weights, tx_maps, target):
@@ -72,7 +73,6 @@ def base_optimize(
         updates, new_opt_state = optimizer.update(grads, opt_state)
         updates_txm, updates_weights = updates
 
-
         txm_new_state = optax.apply_updates(tx_maps, updates_txm)
         weights_new_state = weights
         if not constant_weights:
@@ -89,7 +89,7 @@ def base_optimize(
 
     for step in range(n_steps):
         if step > 2 and jnp.abs(losses[-1] - losses[-2]) < eps:
-            wandb.log({"convergence_steps": step})
+            logger({"convergence_steps": step})
             print(f"Converged after {step} steps")
             break
 
@@ -124,6 +124,7 @@ def segmentation_optimize(
     constant_weights=False,
     n_steps=500,
     loss_logger=None,
+    logger=wandb.log,
     eps=1e-8,
 ) -> OptimizationRetT:
     """
@@ -206,7 +207,7 @@ def segmentation_optimize(
     for step in range(n_steps):
         st = time.time()
         if step > 2 and jnp.abs(losses[-1] - losses[-2]) < eps:
-            wandb.log({"convergence_steps": step})
+            logger({"convergence_steps": step})
             print(f"Converged after {step} steps")
             break
 
@@ -220,7 +221,7 @@ def segmentation_optimize(
 
         if step % 100 == 0:
             print(f"\nStep {step}, Loss: {loss:.6f}")
-            wandb.log(
+            logger(
                 {
                     "mins_per_hundred_steps": (time.time() - long_step) / 60,
                 }
@@ -234,7 +235,7 @@ def segmentation_optimize(
         min_it_time = min(min_it_time, it_time)
 
     # TODO: abstract out
-    wandb.log(
+    logger(
         {
             "avg_it_time": avg_it_time,
             "max_it_time": max_it_time,

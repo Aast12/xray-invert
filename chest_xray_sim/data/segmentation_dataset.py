@@ -149,6 +149,7 @@ if __name__ == "__main__":
     batch = next(iter(ds))
     images, masks, meta = batch
 
+
     fig, ax = plt.subplots(2, 4, figsize=(12, 3))
     for i in range(4):
         im, sgm = images[i].squeeze(0), masks[i]

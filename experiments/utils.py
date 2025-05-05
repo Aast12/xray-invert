@@ -29,6 +29,7 @@ def map_range(
     "Maps the range of x from [src_min, src_max] to [dst_min, dst_max]."
     return (x - src_min) / (src_max - src_min) * (dst_max - dst_min) + dst_min
 
+
 def get_random(
     key,
     shape,
@@ -59,6 +60,10 @@ def get_batch_mean_loss(unbatched_loss, in_axes=(0, None, 0, 0), **vmap_args):
 
 def get_batch_fwd(forward, in_axes=(0, None), **vmap_args):
     return jax.vmap(forward, in_axes=in_axes, **vmap_args)
+
+
+def empty_loss_logger(loss, *args):
+    pass
 
 
 def basic_loss_logger(loss, *args):
@@ -278,14 +283,14 @@ def save_image(img, path: str, bits: int = 8):
     cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
 
 
-def log_image(label: str, img, bits=8):
+def log_image(label: str, img, bits=8, logger=wandb.log):
     """
     Log an image to wandb with a specified label and bit depth.
     Assumes the image is in the range [0, 1] and scales it to the specified bit depth.
     """
     rng = 2**bits - 1
     dtype = BIT_DTYPES[bits]
-    wandb.log({label: wandb.Image(np.array(img * rng, dtype=dtype))})
+    logger({label: wandb.Image(np.array(img * rng, dtype=dtype))})
 
 
 def log_run_metrics(run, metrics, prefix):
