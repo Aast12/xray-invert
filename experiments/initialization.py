@@ -3,6 +3,8 @@ from typing import Literal, overload
 import jax
 import jax.numpy as jnp
 
+DTYPE = jnp.float16
+
 
 def generate_range_normal(
     key: jax.Array,
@@ -12,7 +14,7 @@ def generate_range_normal(
     **kwargs,
 ) -> jax.Array:
     minval, maxval = val_range
-    arr = jax.random.normal(key, shape=shape)
+    arr = jax.random.normal(key, shape=shape, dtype=DTYPE)
     ratio = (arr - arr.min(axis=axis)) / (arr.max(axis=axis) - arr.min(axis=axis))
     return ratio * (maxval - minval) + minval
 
@@ -32,7 +34,9 @@ def _range_init(
         return generate_range_normal(key, shape, val_range, axis, *kwargs)
     elif mode == "uniform":
         minval, maxval = val_range
-        arr = jax.random.uniform(key, minval=minval, maxval=maxval, shape=shape)
+        arr = jax.random.uniform(
+            key, minval=minval, maxval=maxval, shape=shape, dtype=DTYPE
+        )
     else:
         raise ValueError(f"Unknown initialization mode: {mode}")
 
@@ -54,9 +58,9 @@ def initialize(
         return _range_init(key, shape, val_range, mode, axis, *kwargs)
     elif mode == "target":
         assert target is not None, "target must be provided for copy mode"
-        return target.copy()
+        return target.copy().astype(DTYPE)
     elif mode == "zeros":
-        return jnp.zeros(shape) + 1e-6
+        return jnp.zeros(shape, dtype=DTYPE) + 1e-6
     else:
         raise ValueError(f"Unknown initialization mode: {mode}")
 

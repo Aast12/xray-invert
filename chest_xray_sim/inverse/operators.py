@@ -32,7 +32,6 @@ def low_pass(image: Image, sigma: float):
     return x - blurred
 
 
-@jax.jit
 def unsharp_masking_alt(image: Image, sigma: float, enhance_factor: float):
     x = jnp.expand_dims(image, axis=2)
     kernel_size = 2 * sigma

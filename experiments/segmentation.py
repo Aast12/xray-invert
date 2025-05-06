@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+import joblib
 import itertools
 import os
 
@@ -15,7 +17,9 @@ import wandb
 from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
 import chest_xray_sim.inverse.metrics as metrics
 import chest_xray_sim.inverse.operators as ops
-from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
+from chest_xray_sim.data.segmentation_dataset import (
+    get_segmentation_dataset,
+)
 from chest_xray_sim.data.segmentation import (
     MASK_GROUPS,
     ChestSegmentation,
@@ -36,9 +40,11 @@ import projections as proj
 
 
 DEBUG = True
+DTYPE = jnp.float16
 
 
-class ExperimentArgs(TypedDict):
+@dataclass(frozen=True)
+class ExperimentArgs:
     lr: float
     n_steps: int
     total_variation: float
@@ -153,7 +159,7 @@ def compute_single_mask_penalty(
     below_min = jnp.maximum(0.0, min_val - region_values) ** 2
     above_max = jnp.maximum(0.0, region_values - max_val) ** 2
 
-    region_penalty = jnp.sum(
+    region_penalty = jnp.mean(
         (below_min + above_max) / (jnp.expand_dims(region_size, (1, 2)) + 1e6)
     )
     return penalties.at[mask_id].set(region_penalty)
@@ -181,8 +187,9 @@ def detached_segmentation_sq_penalty(
     segmentation: Float[Array, "batch reduced_labels height width"],
     value_ranges: Float[Array, "reduced_labels 2"],
 ):
-    penalties = jnp.ones(value_ranges.shape[0])
+    penalties = jnp.ones((value_ranges.shape[0], txm.shape[0]))
 
+    jax.debug.print("penalties shape: {x}", x=penalties.shape)
     # TODO: possibly improve by making broadcast operations
     for mask_id, val_range in enumerate(value_ranges):
         mask = segmentation[:, mask_id]
@@ -191,13 +198,16 @@ def detached_segmentation_sq_penalty(
         region_values = txm * mask
         region_size = jnp.sum(mask, axis=(-2, -1))
 
+        jax.debug.print("region size: {x}", x=region_size.shape)
+
         below_min = jnp.maximum(0.0, min_val - region_values) ** 2
         above_max = jnp.maximum(0.0, region_values - max_val) ** 2
 
         region_penalty = (below_min + above_max) / (
             jnp.expand_dims(region_size, (1, 2)) + 1e6
         )
-        penalties = penalties.at[mask_id].set(jnp.sum(region_penalty))
+        jax.debug.print("region penalty: {x}", x=region_penalty.shape)
+        penalties = penalties.at[mask_id].set(jnp.sum(region_penalty, axis=(-2, -1)))
 
     jax.debug.print("penalties shape: {x}", x=penalties.shape)
 
@@ -254,7 +264,7 @@ def batch_evaluation(
     ssim = metrics.ssim(pred, images)
     penalties = detached_segmentation_sq_penalty(txm, segmentation, value_ranges)
 
-    return psnr, ssim, penalties
+    return ssim, psnr, penalties
 
 
 def segmentation_projection(
@@ -350,7 +360,7 @@ def run_experiment(
         )
 
     # Initialize transmission map with appropriate range
-    init_mode, init_config = hyperparams["tm_init_params"]
+    init_mode, init_config = hyperparams.tm_init_params
 
     init_params: dict[str, Any] = dict(mode=init_mode)
     print("init mode", init_mode)
@@ -363,7 +373,7 @@ def run_experiment(
 
     logger({"init_mode": init_mode})
 
-    txm0 = init.initialize(hyperparams["PRNGKey"], images.shape, **init_params)
+    txm0 = init.initialize(hyperparams.PRNGKey, images.shape, **init_params)
 
     # Initial parameters for the forward model, should yield a proper image processing
     # for constant weights
@@ -380,11 +390,11 @@ def run_experiment(
         return segmentation_loss(
             *args,
             value_ranges=value_ranges,
-            tv_factor=hyperparams["total_variation"],
-            prior_weight=hyperparams["prior_weight"],
+            tv_factor=hyperparams.total_variation,
+            prior_weight=hyperparams.prior_weight,
         )
 
-    optimizer = optax.adam(learning_rate=hyperparams["lr"])
+    optimizer = optax.adam(learning_rate=hyperparams.lr)
 
     # todo: any processing with losses?
     state, _ = segmentation_optimize(
@@ -398,9 +408,9 @@ def run_experiment(
         loss_logger=loss_logger,
         logger=logger,
         project_fn=segmentation_projection,
-        constant_weights=hyperparams.get("constant_weights", False),
-        n_steps=hyperparams["n_steps"],
-        eps=hyperparams["eps"],
+        constant_weights=hyperparams.constant_weights or False,
+        n_steps=hyperparams.n_steps,
+        eps=hyperparams.eps,
     )
 
     if state is None:
@@ -601,6 +611,53 @@ def sweep_based_exec(dataset, project, sweep_name, desc, tags, sweep_config=None
     )
 
 
+memory = joblib.Memory("cache", verbose=3)
+
+
+@memory.cache
+def single_experiment(
+    images,
+    masks,
+    value_ranges,
+    hyperparams: ExperimentArgs,
+    sample_size: int,
+):
+    print("starting single experiment exec")
+    segmentations = jnp.array(masks, dtype=DTYPE)
+    value_ranges = jnp.array(value_ranges, dtype=DTYPE)
+    images = jnp.array(images, dtype=DTYPE).squeeze(1)
+
+    txm, weights, pred = run_experiment(
+        images,
+        segmentations,
+        value_ranges,
+        hyperparams,
+        logger=empty_logger,
+    )
+
+    seg_labels, segmentations = batch_get_exclusive_masks(segmentations, 0.6)
+    ssim, psnr, penalties = batch_evaluation(
+        images, txm, pred, segmentations, value_ranges
+    )
+
+    sample_size = min(sample_size, images.shape[0])
+
+    return (
+        (
+            txm[:sample_size],
+            pred[:sample_size],
+            images[:sample_size],
+            segmentations[:sample_size],
+        ),
+        weights,
+        (
+            ssim,
+            psnr,
+            penalties,
+        ),
+    )
+
+
 if __name__ == "__main__":
     args = args_spec()
 
@@ -631,22 +688,8 @@ if __name__ == "__main__":
         frontal_lateral=args.frontal_lateral,
         batch_size=args.batch_size,
     )
+
     value_ranges = get_priors(args.cache_dir)
-
-    # Run the sweep
-    # sweep_based_exec(
-    #     dataset,
-    #     project=PROJECT,
-    #     sweep_name=SWEEP_NAME,
-    #     desc=FWD_DESC,
-    #     tags=TAGS,
-    #     sweep_config=None,
-    # )
-    #
-
-    print("running single experiment")
-    batch = next(iter(dataset))
-    images, masks, meta = batch
 
     hyperparams = ExperimentArgs(
         lr=0.02,
@@ -659,43 +702,87 @@ if __name__ == "__main__":
         eps=1e-6,
     )
 
-    segmentations = jnp.array(masks.cpu().numpy())
-    print("max segmentation", jnp.max(segmentations))
-    print("min segmentation", jnp.min(segmentations))
+    print("running single experiment")
+    batch = next(iter(dataset))
+    images, masks, meta = batch
+    value_ranges = get_priors(args.cache_dir)
+
+    print("max segmentation", masks.max())
+    print("min segmentation", masks.min())
 
     a = plt.imshow(masks[0][0])
     plt.colorbar(a)
 
-    images = jnp.array(images.cpu().numpy()).squeeze(1)
-    txm, weights, pred = run_experiment(
-        images,
-        segmentations,
-        value_ranges,
+    sample_size = 10
+    batch_data, weights, metrics_data = single_experiment(
+        images.cpu().numpy(),
+        masks.cpu().numpy(),
+        np.array(value_ranges),
         hyperparams,
-        logger=empty_logger,
+        sample_size,
     )
 
-    seg_labels, segmentations = batch_get_exclusive_masks(segmentations, 0.6)
-    ssim, psnr, penalties = batch_evaluation(
-        images, txm, pred, segmentations, value_ranges
+    (txm, pred, images, segmentations), (ssim, psnr, penalties) = (
+        batch_data,
+        metrics_data,
     )
+    # sync returned sample size
+    meta = meta[:sample_size]
+
+    print("evaluation shapes")
+    print("txm shape", txm.shape)
+    print("pred shape", pred.shape)
+
+    print("ssim shape", ssim.shape)
+    print("psnr shape", psnr.shape)
+    print("mse shape", segmentations.shape)
 
     mse = (pred - images) ** 2
+
+    print("img max pixel", jnp.max(images))
+    print("img min pixel", jnp.min(images))
 
     print("max pixel", jnp.max(segmentations))
     print("min pixel", jnp.min(segmentations))
 
+    print("MSE: ", mse.mean())
     print("penalties", penalties.shape)
+
+    i = jnp.argmax(ssim).item()
+
+    sample_fwd, sample_pred = images[i], pred[i]
+
+    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+    ax[0].imshow(sample_fwd, cmap="gray")
+    ax[0].set_title("Forward Image")
+    ax[1].imshow(sample_pred, cmap="gray")
+    ax[1].set_title("Recovered Image")
+    # label ssim index
+    ax[1].text(
+        0.5,
+        0.5,
+        f"SSIM: {metrics.ssim(sample_fwd, sample_pred):.4f}",
+        fontsize=12,
+        ha="center",
+        va="center",
+        transform=ax[1].transAxes,
+    )
+    plt.show()
+
     fig, ax = plt.subplots(2, 2, figsize=(20, 5))
     ax = ax.flatten()
+
+    print("ssim recompute", metrics.ssim(pred, images))
+    print("ssim recompute alt", metrics.ssim(images, pred))
+    print("ssim flatten", ssim)
 
     ax[0].boxplot(ssim.flatten())
     ax[0].set_title("SSIM")
     ax[1].boxplot(psnr.flatten())
     ax[1].set_title("PSNR")
-    ax[2].boxplot(mse.flatten())
+    ax[2].boxplot(mse.flatten(), showfliers=False)
     ax[2].set_title("MSE")
-    ax[3].boxplot(penalties.flatten())
+    ax[3].boxplot(penalties[0].flatten())
     ax[3].set_title("PENALTIES")
     plt.show()
 
@@ -712,3 +799,14 @@ if __name__ == "__main__":
         weights,
         meta,
     )
+
+    # Run the sweep
+    # sweep_based_exec(
+    #     dataset,
+    #     project=PROJECT,
+    #     sweep_name=SWEEP_NAME,
+    #     desc=FWD_DESC,
+    #     tags=TAGS,
+    #     sweep_config=None,
+    # )
+    #

@@ -108,6 +108,7 @@ def get_segmentation_dataset(
     split: typing.Literal["train", "valid"] | None = None,
     frontal_lateral: typing.Literal["Frontal", "Lateral"] | None = "Frontal",
     batch_size: int = 12,
+    seed: int = 0,
     **kwargs,
 ):
     print("using batch size", batch_size)
@@ -124,8 +125,10 @@ def get_segmentation_dataset(
     ds_loader = DataLoader(
         ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
+        generator=torch.Generator().manual_seed(seed),
         collate_fn=SegmentationChexpertDataset.collate,
+        hash_key=(data_dir, split, frontal_lateral, batch_size, seed),
     )
     return ds_loader
 
@@ -148,7 +151,6 @@ if __name__ == "__main__":
 
     batch = next(iter(ds))
     images, masks, meta = batch
-
 
     fig, ax = plt.subplots(2, 4, figsize=(12, 3))
     for i in range(4):
