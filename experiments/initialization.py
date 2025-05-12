@@ -3,8 +3,7 @@ from typing import Literal, overload
 import jax
 import jax.numpy as jnp
 
-DTYPE = jnp.float16
-
+DTYPE = jnp.float32
 
 def generate_range_normal(
     key: jax.Array,

@@ -283,6 +283,12 @@ def save_image(img, path: str, bits: int = 8):
     cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
 
 
+def pull_image(img, bits=8, logger=wandb.log):
+    rng = 2**bits - 1
+    dtype = BIT_DTYPES[bits]
+    return wandb.Image(np.array(img * rng, dtype=dtype))
+
+
 def log_image(label: str, img, bits=8, logger=wandb.log):
     """
     Log an image to wandb with a specified label and bit depth.

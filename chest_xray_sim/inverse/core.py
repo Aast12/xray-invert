@@ -124,6 +124,7 @@ def segmentation_optimize(
     constant_weights=False,
     n_steps=500,
     loss_logger=None,
+    summary=None,
     logger=wandb.log,
     eps=1e-8,
 ) -> OptimizationRetT:
@@ -207,7 +208,8 @@ def segmentation_optimize(
     for step in range(n_steps):
         st = time.time()
         if step > 2 and jnp.abs(losses[-1] - losses[-2]) < eps:
-            logger({"convergence_steps": step})
+            if summary:
+                summary({"convergence_steps": step})
             print(f"Converged after {step} steps")
             break
 
@@ -220,10 +222,11 @@ def segmentation_optimize(
             break
 
         if step % 100 == 0:
-            print(f"\nStep {step}, Loss: {loss:.6f}")
+            loop_time = (time.time() - long_step) / 60
+            print(f"\nStep {step}, Loss: {loss:.6f} ({loop_time:.2f} mins)")
             logger(
                 {
-                    "mins_per_hundred_steps": (time.time() - long_step) / 60,
+                    "mins_per_hundred_steps": loop_time,
                 }
             )
             long_step = time.time()
@@ -235,13 +238,14 @@ def segmentation_optimize(
         min_it_time = min(min_it_time, it_time)
 
     # TODO: abstract out
-    logger(
-        {
-            "avg_it_time": avg_it_time,
-            "max_it_time": max_it_time,
-            "min_it_time": min_it_time,
-        }
-    )
+    if summary:
+        summary(
+            {
+                "avg_it_time": avg_it_time,
+                "max_it_time": max_it_time,
+                "min_it_time": min_it_time,
+            }
+        )
 
     if state is None:
         return None, losses

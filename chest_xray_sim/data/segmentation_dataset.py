@@ -128,9 +128,14 @@ def get_segmentation_dataset(
         shuffle=False,
         generator=torch.Generator().manual_seed(seed),
         collate_fn=SegmentationChexpertDataset.collate,
-        hash_key=(data_dir, split, frontal_lateral, batch_size, seed),
     )
     return ds_loader
+
+
+def iter_as_numpy(ds_loader):
+    """Convert a DataLoader to a numpy array."""
+    for images, masks, meta in ds_loader:
+        yield images.cpu().numpy(), masks.cpu().numpy(), meta
 
 
 if __name__ == "__main__":
