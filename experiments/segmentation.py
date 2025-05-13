@@ -13,10 +13,10 @@ import torch
 from eval import batch_evaluation
 from jaxtyping import Array, Float, PyTree
 from loss import (
-    gradient_magnitude_similarity,
     mse,
     segmentation_sq_penalty,
     total_variation,
+    unsharp_mask_similarity,
 )
 from segmentation_utils import get_priors
 from torch import Tensor
@@ -135,7 +135,9 @@ def segmentation_loss(
     segmentation_penalty = segmentation_sq_penalty(
         txm, segmentation, value_ranges
     )
-    gms = gradient_magnitude_similarity(pred, target)
+
+    # TODO: rename gms
+    gms = unsharp_mask_similarity(pred, target)
 
     return (
         mse_val

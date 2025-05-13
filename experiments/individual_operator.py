@@ -13,10 +13,10 @@ import projections as proj
 from eval import batch_evaluation
 from jaxtyping import Array, Float, PyTree
 from loss import (
-    gradient_magnitude_similarity,
     mse,
     segmentation_sq_penalty,
     total_variation,
+    unsharp_mask_similarity,
 )
 from segmentation_utils import get_priors
 from torch import Tensor
@@ -151,7 +151,8 @@ def segmentation_loss(
         txm, segmentation, value_ranges
     )
 
-    gms = gradient_magnitude_similarity(pred, target)
+    # TODO: rename gms
+    gms = unsharp_mask_similarity(pred, target)
 
     return (
         mse_value
@@ -472,7 +473,8 @@ def sweep_based_exec(
                 # regularization params, ensure they have some influence in loss
                 "total_variation": {"min": 0.1, "max": 0.5},
                 "prior_weight": {"min": 0.1, "max": 0.5},
-                "gmse_weight": {"min": 0.0, "max": 0.5},
+                # "gmse_weight": {"min": 0.0, "max": 0.5},
+                "gmse_weight": {"value": 0.0},
                 "PRNGKey": {"values": [0, 42]},
                 "tm_init_params": {
                     "values": [

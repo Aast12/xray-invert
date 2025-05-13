@@ -1,5 +1,6 @@
 import functools
 
+import dm_pix as dmp
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
@@ -22,24 +23,30 @@ def total_variation(pred: ForwardT):
     return metrics.total_variation(pred)
 
 
-@functools.partial(jax.jit, static_argnums=(2,))
-def gradient_magnitude_similarity(pred: ForwardT, target: ForwardT, c=0.0026):
-    # Compute gradients
-    gx_pred, gy_pred = jnp.gradient(pred)
-    gx_target, gy_target = jnp.gradient(target)
+@functools.partial(jax.jit, static_argnums=(2))
+def unsharp_mask_similarity(pred, target, sigma=3.0):
+    x_detail = (
+        pred
+        - dmp.gaussian_blur(
+            jnp.expand_dims(pred, axis=2),
+            sigma,
+            kernel_size=int(2 * sigma),
+            padding="SAME",
+        ).squeeze()
+    )
+    y_detail = (
+        target
+        - dmp.gaussian_blur(
+            jnp.expand_dims(target, axis=2),
+            sigma,
+            kernel_size=int(2 * sigma),
+            padding="SAME",
+        ).squeeze()
+    )
 
-    # Compute gradient magnitudes
-    gm_pred = jnp.sqrt(gx_pred**2 + gy_pred**2)
-    gm_target = jnp.sqrt(gx_target**2 + gy_target**2)
+    detail_mse = jnp.mean((x_detail - y_detail) ** 2)
 
-    # Compute GMS
-    gm_xy = gm_pred * gm_target
-    gm_xx = gm_pred**2
-    gm_yy = gm_target**2
-
-    gms = (2 * gm_xy + c) / (gm_xx + gm_yy + c)
-
-    return jnp.mean(gms)
+    return detail_mse
 
 
 @jax.jit
