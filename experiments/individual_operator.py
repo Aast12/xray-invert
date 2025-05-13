@@ -10,8 +10,10 @@ import joblib
 import numpy as np
 import optax
 import projections as proj
+from eval import batch_evaluation
 from jaxtyping import Array, Float, PyTree
 from loss import (
+    gradient_magnitude_similarity,
     mse,
     segmentation_sq_penalty,
     total_variation,
@@ -38,7 +40,6 @@ from chest_xray_sim.data.segmentation_dataset import (
 )
 from chest_xray_sim.inverse.core import segmentation_optimize
 from chest_xray_sim.types import TransmissionMapT
-from experiments.eval import batch_evaluation
 
 DEBUG = True
 DTYPE = jnp.float32
@@ -50,6 +51,7 @@ class ExperimentArgs:
     n_steps: int
     total_variation: float
     prior_weight: float
+    gmse_weight: float
     PRNGKey: int
     tm_init_params: tuple[str, tuple[float, float] | None]
     constant_weights: bool
@@ -123,6 +125,7 @@ def segmentation_loss(
     value_ranges: Float[Array, "reduced_labels 2"],
     tv_factor=0.1,
     prior_weight=0.5,
+    gmse_weight=0.5,
 ):
     """
     Loss function that incorporates segmentation information using probabilistic priors.
@@ -148,7 +151,14 @@ def segmentation_loss(
         txm, segmentation, value_ranges
     )
 
-    return mse_value + tv_factor * tv + prior_weight * segmentation_penalty
+    gms = gradient_magnitude_similarity(pred, target)
+
+    return (
+        mse_value
+        + tv_factor * tv
+        + prior_weight * segmentation_penalty
+        + gmse_weight * gms
+    )
 
 
 def segmentation_projection(
@@ -336,6 +346,7 @@ def wandb_experiment(
             value_ranges=value_ranges,
             tv_factor=hyperparams.total_variation,
             prior_weight=hyperparams.prior_weight,
+            gmse_weight=hyperparams.gmse_weight,
         )
 
     optimizer = optax.adam(learning_rate=hyperparams.lr)
@@ -461,6 +472,7 @@ def sweep_based_exec(
                 # regularization params, ensure they have some influence in loss
                 "total_variation": {"min": 0.1, "max": 0.5},
                 "prior_weight": {"min": 0.1, "max": 0.5},
+                "gmse_weight": {"min": 0.0, "max": 0.5},
                 "PRNGKey": {"values": [0, 42]},
                 "tm_init_params": {
                     "values": [
@@ -563,13 +575,14 @@ if __name__ == "__main__":
 
     # sweep based config
     PROJECT = "per-image-operators"
-    SWEEP_NAME = "per-image-operators-search"
+    SWEEP_NAME = "include-gmse"
     FWD_DESC = "negative log, windowing, range normalization, unsharp masking, clipping"
 
     TAGS = [
         "segmentation-guided",
         "square-penalty",
         "fixed",
+        "gmse",
         *[f.strip() for f in FWD_DESC.split(",")],
     ]
 

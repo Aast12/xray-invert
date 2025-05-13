@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 from jaxtyping import Array, Float
+from loss import compute_single_mask_penalty
 
 from chest_xray_sim.inverse import metrics
 from chest_xray_sim.types import (
@@ -10,7 +11,6 @@ from chest_xray_sim.types import (
     TransmissionMapT,
     ValueRangeT,
 )
-from experiments.loss import compute_single_mask_penalty
 
 DEBUG = True
 

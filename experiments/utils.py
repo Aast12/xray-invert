@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import joblib
 import numpy as np
 from cv2.typing import MatLike
+from eval import batch_evaluation
 from jaxtyping import Array, Float, Scalar
 from skimage.transform import resize
 
@@ -23,7 +24,6 @@ from chest_xray_sim.types import (
     ValueRangeT,
     WeightsT,
 )
-from experiments.eval import batch_evaluation
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
 

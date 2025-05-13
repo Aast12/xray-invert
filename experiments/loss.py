@@ -1,3 +1,5 @@
+import functools
+
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
@@ -18,6 +20,26 @@ def mse(pred: ForwardT, target: ForwardT):
 
 def total_variation(pred: ForwardT):
     return metrics.total_variation(pred)
+
+
+@functools.partial(jax.jit, static_argnums=(2,))
+def gradient_magnitude_similarity(pred: ForwardT, target: ForwardT, c=0.0026):
+    # Compute gradients
+    gx_pred, gy_pred = jnp.gradient(pred)
+    gx_target, gy_target = jnp.gradient(target)
+
+    # Compute gradient magnitudes
+    gm_pred = jnp.sqrt(gx_pred**2 + gy_pred**2)
+    gm_target = jnp.sqrt(gx_target**2 + gy_target**2)
+
+    # Compute GMS
+    gm_xy = gm_pred * gm_target
+    gm_xx = gm_pred**2
+    gm_yy = gm_target**2
+
+    gms = (2 * gm_xy + c) / (gm_xx + gm_yy + c)
+
+    return jnp.mean(gms)
 
 
 @jax.jit

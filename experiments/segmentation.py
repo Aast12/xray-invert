@@ -1,6 +1,6 @@
 import itertools
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Callable, TypedDict
 
 import initialization as init
@@ -10,9 +10,14 @@ import numpy as np
 import optax
 import projections as proj
 import torch
-from eval import batch_evaluation, psnr, ssim
+from eval import batch_evaluation
 from jaxtyping import Array, Float, PyTree
-from loss import segmentation_sq_penalty
+from loss import (
+    gradient_magnitude_similarity,
+    mse,
+    segmentation_sq_penalty,
+    total_variation,
+)
 from segmentation_utils import get_priors
 from torch import Tensor
 from utils import (
@@ -27,7 +32,6 @@ import chest_xray_sim.inverse.operators as ops
 import wandb
 from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
 from chest_xray_sim.data.segmentation import (
-    MASK_GROUPS,
     ChestSegmentation,
     batch_get_exclusive_masks,
 )
@@ -51,6 +55,7 @@ class ExperimentArgs:
     n_steps: int
     total_variation: float
     prior_weight: float
+    gmse_weight: float
     PRNGKey: int
     tm_init_params: tuple[str, tuple[float, float] | None]
     constant_weights: bool
@@ -105,6 +110,7 @@ def segmentation_loss(
     value_ranges: ValueRangeT,
     tv_factor=0.1,
     prior_weight=0.5,
+    gmse_weight=0.1,
 ):
     """
     Loss function that incorporates segmentation information using probabilistic priors.
@@ -123,14 +129,20 @@ def segmentation_loss(
         tv_factor: Weight for total variation regularization
         prior_weight: Weight for anatomical priors
     """
-    mse = metrics.mse(pred, target)
-    tv = metrics.total_variation(txm)
+    mse_val = mse(pred, target)
+    tv_val = total_variation(txm)
 
     segmentation_penalty = segmentation_sq_penalty(
         txm, segmentation, value_ranges
     )
+    gms = gradient_magnitude_similarity(pred, target)
 
-    return mse + tv_factor * tv + prior_weight * segmentation_penalty
+    return (
+        mse_val
+        + tv_factor * tv_val
+        + prior_weight * segmentation_penalty
+        + gmse_weight * gms
+    )
 
 
 def segmentation_projection(
@@ -285,6 +297,7 @@ def wandb_experiment(
             value_ranges=value_ranges,
             tv_factor=hyperparams.total_variation,
             prior_weight=hyperparams.prior_weight,
+            gmse_weight=hyperparams.gmse_weight,
         )
 
     optimizer = optax.adam(learning_rate=hyperparams.lr)
@@ -410,6 +423,7 @@ def sweep_based_exec(
                 # regularization params, ensure they have some influence in loss
                 "total_variation": {"min": 0.1, "max": 0.5},
                 "prior_weight": {"min": 0.2, "max": 1.0},
+                "gmse_weight": {"min": 0.0, "max": 0.5},
                 "PRNGKey": {"values": [0, 42]},
                 "tm_init_params": {
                     "values": [
@@ -512,8 +526,6 @@ def single_experiment(
 if __name__ == "__main__":
     args = args_spec()
 
-    from matplotlib import pyplot as plt
-
     model = ChestSegmentation(cache_dir=args.cache_dir)
 
     def get_experiment_input_from_files(
@@ -542,13 +554,14 @@ if __name__ == "__main__":
     print("Using args:", args)
 
     # sweep based config
-    PROJECT = "segmentation-guided-transmission"
-    SWEEP_NAME = "seg-guided-optimization"
+    PROJECT = "segmentation-shared-operator"
+    SWEEP_NAME = "include-gmse"
     FWD_DESC = "negative log, windowing, range normalization, unsharp masking, clipping"
 
     TAGS = [
         "segmentation-guided",
         "square-penalty",
+        "gmse",
         "fixed",
         *[f.strip() for f in FWD_DESC.split(",")],
     ]
@@ -565,16 +578,16 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
     )
 
-    hyperparams = ExperimentArgs(
-        lr=0.02,
-        n_steps=400,
-        total_variation=0.1,
-        prior_weight=0.15,
-        PRNGKey=0,
-        tm_init_params=("normal", (0.2, 0.8)),
-        constant_weights=False,
-        eps=1e-6,
-    )
+    # hyperparams = ExperimentArgs(
+    #     lr=0.02,
+    #     n_steps=400,
+    #     total_variation=0.1,
+    #     prior_weight=0.15,
+    #     PRNGKey=0,
+    #     tm_init_params=("normal", (0.2, 0.8)),
+    #     constant_weights=False,
+    #     eps=1e-6,
+    # )
 
     # dataset = iter_as_numpy(dataset)
     # batch = next(iter(dataset))
@@ -598,8 +611,8 @@ if __name__ == "__main__":
     # )
     sweep_based_exec(
         dataset,
-        project="segmentation-shared-operator",
-        sweep_name="find-segmentation-params",
+        project=PROJECT,
+        sweep_name=SWEEP_NAME,
         desc="Segmentation-guided optimization with square penalty",
         tags=TAGS,
         args=args,
@@ -609,70 +622,69 @@ if __name__ == "__main__":
 
     sys.exit()
 
-    a = plt.imshow(masks[0][0])
-    plt.colorbar(a)
+    # a = plt.imshow(masks[0][0])
+    # plt.colorbar(a)
 
-    run = wandb.init(
-        project="headless-runs",
-        tags=[f"batch_size={args.batch_size}"],
-        config=asdict(hyperparams),
-    )
+    # run = wandb.init(
+    #     project="headless-runs",
+    #     tags=[f"batch_size={args.batch_size}"],
+    #     config=asdict(hyperparams),
+    # )
 
-    sample_size = args.batch_size
+    # sample_size = args.batch_size
 
-    def summary(body):
-        for k, v in body.items():
-            run.summary[k] = v
+    # def summary(body):
+    #     for k, v in body.items():
+    #         run.summary[k] = v
 
-    batch_data, weights, metrics_data = single_experiment(
-        images,
-        masks,
-        value_ranges,
-        hyperparams,
-        sample_size,
-        logger=run.log,
-        summary=summary,
-        loss_logger=basic_loss_logger,
-    )
+    # batch_data, weights, metrics_data = single_experiment(
+    #     images,
+    #     masks,
+    #     value_ranges,
+    #     hyperparams,
+    #     sample_size,
+    #     logger=run.log,
+    #     summary=summary,
+    #     loss_logger=basic_loss_logger,
+    # )
 
-    save_dir = os.path.join("./outputs", run.id)
+    # save_dir = os.path.join("./outputs", run.id)
 
-    (txm, pred, images, segmentations), (ssim, psnr, penalties) = (
-        batch_data,
-        metrics_data,
-    )
-    # sync returned sample size
-    meta = meta[:sample_size]
+    # (txm, pred, images, segmentations), (ssim, psnr, penalties) = (
+    #     batch_data,
+    #     metrics_data,
+    # )
+    # # sync returned sample size
+    # meta = meta[:sample_size]
 
-    mse = (pred - images) ** 2
-    i = jnp.argmax(ssim).item()
+    # i = jnp.argmax(ssim).item()
 
-    sample_fwd, sample_pred = images[i], pred[i]
+    # sample_fwd, sample_pred = images[i], pred[i]
 
-    run.log(
-        {
-            "SSIM": wandb.Histogram(ssim.flatten()),
-            "PSNR": wandb.Histogram(psnr.flatten()),
-        }
-    )
+    # run.log(
+    #     {
+    #         "SSIM": wandb.Histogram(ssim.flatten()),
+    #         "PSNR": wandb.Histogram(psnr.flatten()),
+    #     }
+    # )
 
-    # TODO: fix segmentation labels forwarding
-    for i, label in enumerate(MASK_GROUPS):
-        run.log({f"{label} penalty": wandb.Histogram(penalties[i].flatten())})
+    # # TODO: fix segmentation labels forwarding
+    # for i, label in enumerate(MASK_GROUPS):
+    #     run.log({f"{label} penalty": wandb.Histogram(penalties[i].flatten())})
 
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    # if not os.path.exists(save_dir):
+    #     os.makedirs(save_dir)
 
-    run_save_path = save_dir
-    os.makedirs(run_save_path, exist_ok=True)
+    # run_save_path = save_dir
+    # os.makedirs(run_save_path, exist_ok=True)
 
-    joblib.dump(hyperparams, os.path.join(save_dir, "hyperparams.joblib"))
+    # joblib.dump(hyperparams, os.path.join(save_dir, "hyperparams.joblib"))
 
-    save_results(
-        save_dir,
-        txm,
-        weights,
-        meta,
-    )
+    # save_results(
+    #     save_dir,
+    #     txm,
+    #     weights,
+    #     meta,
+    # )
 
-    run.finish()
+    # run.finish()
