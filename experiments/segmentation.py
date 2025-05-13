@@ -1,40 +1,45 @@
-from dataclasses import asdict, dataclass
-import joblib
 import itertools
 import os
+from dataclasses import asdict, dataclass
+from typing import Any, Callable, TypedDict
 
-import cv2
-import jax
+import initialization as init
 import jax.numpy as jnp
+import joblib
 import numpy as np
 import optax
+import projections as proj
 import torch
-from torch import Tensor
+from eval import batch_evaluation, psnr, ssim
 from jaxtyping import Array, Float, PyTree
-from typing import TypedDict, Callable, Any
-import wandb
-
-from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
-import chest_xray_sim.inverse.metrics as metrics
-import chest_xray_sim.inverse.operators as ops
-from chest_xray_sim.data.segmentation import (
-    MASK_GROUPS,
-    ChestSegmentation,
-    batch_get_exclusive_masks,
-    MaskGroupsT,
-)
-from chest_xray_sim.data.utils import read_image
-from chest_xray_sim.inverse.core import segmentation_optimize
-from segmentation_utils import get_priors, compute_single_mask_penalty, segmentation_sq_penalty
+from loss import segmentation_sq_penalty
+from segmentation_utils import get_priors
+from torch import Tensor
 from utils import (
     basic_loss_logger,
     empty_loss_logger,
     experiment_args,
+    process_results,
     pull_image,
 )
-import initialization as init
-import projections as proj
 
+import chest_xray_sim.inverse.operators as ops
+import wandb
+from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
+from chest_xray_sim.data.segmentation import (
+    MASK_GROUPS,
+    ChestSegmentation,
+    batch_get_exclusive_masks,
+)
+from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
+from chest_xray_sim.data.utils import read_image
+from chest_xray_sim.inverse.core import segmentation_optimize
+from chest_xray_sim.types import (
+    ForwardT,
+    SegmentationT,
+    TransmissionMapT,
+    ValueRangeT,
+)
 
 DEBUG = True
 DTYPE = jnp.float32
@@ -60,7 +65,6 @@ class ForwardParams(TypedDict):
     gamma: float
 
 
-TransmissionMapT = Float[Array, "batch height width"]
 WeightsT = PyTree[ForwardParams]
 
 args_spec = experiment_args(
@@ -84,23 +88,21 @@ def forward(
         x, weights["window_center"], weights["window_width"], weights["gamma"]
     )
     x = ops.range_normalize(x)
-    x = ops.unsharp_masking(x, weights["low_sigma"], weights["low_enhance_factor"])
+    x = ops.unsharp_masking(
+        x, weights["low_sigma"], weights["low_enhance_factor"]
+    )
     x = ops.clipping(x)
 
     return x
 
 
-
-
-
-
 def segmentation_loss(
     txm: TransmissionMapT,
     weights: WeightsT,
-    pred: Float[Array, "batch height width"],
-    target: Float[Array, "batch height width"],
-    segmentation: Float[Array, "batch reduced_labels height width"],
-    value_ranges: Float[Array, "reduced_labels 2"],
+    pred: ForwardT,
+    target: ForwardT,
+    segmentation: SegmentationT,
+    value_ranges: ValueRangeT,
     tv_factor=0.1,
     prior_weight=0.5,
 ):
@@ -124,32 +126,11 @@ def segmentation_loss(
     mse = metrics.mse(pred, target)
     tv = metrics.total_variation(txm)
 
-    segmentation_penalty = segmentation_sq_penalty(txm, segmentation, value_ranges)
+    segmentation_penalty = segmentation_sq_penalty(
+        txm, segmentation, value_ranges
+    )
 
     return mse + tv_factor * tv + prior_weight * segmentation_penalty
-
-
-def batch_evaluation(
-    images: Float[Array, "batch height width"],
-    txm: Float[Array, "batch height width"],
-    pred: Float[Array, "batch height width"],
-    segmentation: Float[Array, "batch labels height width"],
-    value_ranges: Float[Array, "reduced_labels 2"],
-):
-    """
-    Evaluate the model on a batch of images and segmentations.
-    """
-
-    psnr = metrics.psnr(pred, images)
-    ssim = metrics.ssim(pred, images)
-    penalties = jnp.ones(value_ranges.shape[0])
-
-    for mask_id, val_range in enumerate(value_ranges):
-        penalties = compute_single_mask_penalty(
-            mask_id, segmentation[:, mask_id], val_range, txm, penalties
-        )
-
-    return ssim, psnr, penalties
 
 
 def segmentation_projection(
@@ -179,39 +160,6 @@ def segmentation_projection(
     return new_txm_state, new_weights_state
 
 
-def save_image(img, path: str, bits=8):
-    """Save normalized image to file"""
-    x = ops.range_normalize(img)
-    max_val = 2**bits - 1
-    cv2.imwrite(path, np.array(x * max_val, dtype=np.uint8 if bits == 8 else np.uint16))
-
-
-def save_results(
-    save_dir: str,
-    txm: TransmissionMapT,
-    weights: WeightsT,
-    meta_batch: list[ChexpertMeta],
-):
-    joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
-    joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
-
-    # Create file names from metadata
-    file_names = [
-        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
-        for m in meta_batch
-    ]
-
-    # Save transmission maps and their processed versions
-    for i, (img, name) in enumerate(zip(txm, file_names)):
-        save_path = os.path.join(save_dir, f"{name}")
-        save_image(img, save_path)
-
-        # Also save the processed version
-        processed = forward(img, weights)
-        proc_path = save_path.replace(".png", "_proc.png")
-        save_image(processed, proc_path)
-
-
 def empty_logger(body):
     pass
 
@@ -231,11 +179,17 @@ def wandb_experiment(
 
     log_samples = min(log_samples, images.shape[0])
 
-    seg_labels, segmentations = batch_get_exclusive_masks(masks_batch, segmentation_th)
+    seg_labels, segmentations = batch_get_exclusive_masks(
+        masks_batch, segmentation_th
+    )
 
     priors_table = wandb.Table(
-            columns=['region', 'min', 'max'],
-            data=[(region, min_val, max_val) for region, (min_val, max_val) in zip(seg_labels, value_ranges)])
+        columns=["region", "min", "max"],
+        data=[
+            (region, min_val, max_val)
+            for region, (min_val, max_val) in zip(seg_labels, value_ranges)
+        ],
+    )
     # priors_table = wandb.Table(columns=["region", "min", "max"])
     # for region, value_range in zip(seg_labels, value_ranges):
     #     min_val, max_val = value_range
@@ -249,7 +203,9 @@ def wandb_experiment(
             "viz_samples": log_samples,
         }
     )
-    rand_samples = np.random.randint(0, images.shape[0], size=log_samples).tolist()
+    rand_samples = np.random.randint(
+        0, images.shape[0], size=log_samples
+    ).tolist()
     rand_samples = sorted(rand_samples)
 
     samples_tables = wandb.Table(columns=["index", "Image"])
@@ -426,54 +382,7 @@ def run_processing(
         return
 
     assert results is not None
-    txm, weights, pred = results
-
-    if save_dir is not None:
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-
-        run_save_path = os.path.join(save_dir, run.id)
-
-        print("saving to", save_dir, run.id, run_save_path)
-        os.makedirs(run_save_path, exist_ok=True)
-
-        save_results(
-            run_save_path,
-            txm,
-            weights,
-            meta_batch,
-        )
-
-    try:
-        psnr, ssim, penalties = batch_evaluation(
-            images, txm, pred, segmentations, value_ranges
-        )
-        run.log(
-            {
-                "psnr": {
-                    "mean": psnr.mean(),
-                    "std": psnr.std(),
-                    "min": psnr.min(),
-                    "max": psnr.max(),
-                    "data": psnr,
-                },
-                "ssim": {
-                    "mean": ssim.mean(),
-                    "std": ssim.std(),
-                    "min": ssim.min(),
-                    "max": ssim.max(),
-                    "data": ssim,
-                },
-                "penalies": {
-                    "sum": penalties.sum(),
-                    "mean": penalties.mean(),
-                    "data": penalties,
-                },
-            }
-        )
-    except Exception as e:
-        print("Error during batch evaluation:", e)
-
+    process_results(images, segmentations, meta_batch, value_ranges, results)
 
 
 def sweep_based_exec(
@@ -500,13 +409,14 @@ def sweep_based_exec(
                 "n_steps": {"values": [300, 600, 1200]},
                 # regularization params, ensure they have some influence in loss
                 "total_variation": {"min": 0.1, "max": 0.5},
-                "prior_weight": {"min": 0.2, "max": 8.0},
+                "prior_weight": {"min": 0.2, "max": 1.0},
                 "PRNGKey": {"values": [0, 42]},
                 "tm_init_params": {
                     "values": [
                         *list(
                             itertools.product(
-                                ["uniform", "normal"], [(0.01, 0.99), (0.2, 0.8)]
+                                ["uniform", "normal"],
+                                [(0.01, 0.99), (0.2, 0.8)],
                             )
                         ),
                         # ("zeros", None),
@@ -576,9 +486,10 @@ def single_experiment(
     )
 
     seg_labels, segmentations = batch_get_exclusive_masks(segmentations, 0.6)
-    ssim, psnr, penalties = batch_evaluation(
-        images, txm, pred, segmentations, value_ranges
-    )
+    metrics = batch_evaluation(images, txm, pred, segmentations, value_ranges)
+    ssim = metrics.ssim
+    psnr = metrics.psnr
+    penalties = metrics.penalties
 
     sample_size = min(sample_size, images.shape[0])
 
@@ -601,7 +512,6 @@ def single_experiment(
 if __name__ == "__main__":
     args = args_spec()
 
-    from pprint import pprint
     from matplotlib import pyplot as plt
 
     model = ChestSegmentation(cache_dir=args.cache_dir)
@@ -639,20 +549,21 @@ if __name__ == "__main__":
     TAGS = [
         "segmentation-guided",
         "square-penalty",
+        "fixed",
         *[f.strip() for f in FWD_DESC.split(",")],
     ]
 
     # Initialize W&B
     # Load dataset with segmentations
-    # dataset = get_segmentation_dataset(
-    #     data_dir=args.data_dir,
-    #     meta_dir=args.meta_dir,
-    #     mask_dir=args.mask_dir,
-    #     cache_dir=args.cache_dir,
-    #     split=args.split,
-    #     frontal_lateral=args.frontal_lateral,
-    #     batch_size=args.batch_size,
-    # )
+    dataset = get_segmentation_dataset(
+        data_dir=args.data_dir,
+        meta_dir=args.meta_dir,
+        mask_dir=args.mask_dir,
+        cache_dir=args.cache_dir,
+        split=args.split,
+        frontal_lateral=args.frontal_lateral,
+        batch_size=args.batch_size,
+    )
 
     hyperparams = ExperimentArgs(
         lr=0.02,
@@ -678,21 +589,22 @@ if __name__ == "__main__":
 
     seg_labels, value_ranges = get_priors(args.cache_dir, as_numpy=True)
 
-    dataset = get_experiment_input_from_files(
-        [
-            "/Volumes/T7/projs/thesis/data/00000001_000.png",
-            "/Volumes/T7/projs/thesis/data/00000001_001.png",
-            "/Volumes/T7/projs/thesis/data/00000001_002.png",
-        ]
-    )
+    # dataset = get_experiment_input_from_files(
+    #     [
+    #         "/Volumes/T7/projs/thesis/data/00000001_000.png",
+    #         "/Volumes/T7/projs/thesis/data/00000001_001.png",
+    #         "/Volumes/T7/projs/thesis/data/00000001_002.png",
+    #     ]
+    # )
     sweep_based_exec(
         dataset,
-        project="headless-runs",
-        sweep_name="find-NIH-params",
+        project="segmentation-shared-operator",
+        sweep_name="find-segmentation-params",
         desc="Segmentation-guided optimization with square penalty",
         tags=TAGS,
         args=args,
     )
+
     import sys
 
     sys.exit()

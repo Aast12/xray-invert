@@ -6,16 +6,115 @@ from typing import Any, Literal
 import cv2
 import jax
 import jax.numpy as jnp
+import joblib
 import numpy as np
 from cv2.typing import MatLike
-from jaxtyping import Float, Array, Scalar
+from jaxtyping import Array, Float, Scalar
 from skimage.transform import resize
 
-import wandb
-from chest_xray_sim.inverse.core import base_optimize
 import chest_xray_sim.inverse.operators as ops
+import wandb
+from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
+from chest_xray_sim.inverse.core import base_optimize
+from chest_xray_sim.types import (
+    ForwardT,
+    SegmentationT,
+    TransmissionMapT,
+    ValueRangeT,
+    WeightsT,
+)
+from experiments.eval import batch_evaluation
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
+
+
+def wandb_vec_metric(id: str, data: Array):
+    return {
+        f"{id}": wandb.Histogram(data),
+        f"{id}_max": data.max(),
+        f"{id}_min": data.min(),
+        f"{id}_mean": data.mean(),
+    }
+
+
+def save_image(img, path: str, bits=8):
+    """save normalized image to file"""
+    x = ops.range_normalize(img)
+    max_val = 2**bits - 1
+    cv2.imwrite(
+        path, np.array(x * max_val, dtype=np.uint8 if bits == 8 else np.uint16)
+    )
+
+
+def save_results(
+    save_dir: str,
+    txm: TransmissionMapT,
+    weights: WeightsT,
+    pred: TransmissionMapT,
+    meta_batch: list[ChexpertMeta],
+):
+    joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
+    joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
+
+    # Create file names from metadata
+    file_names = [
+        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
+        for m in meta_batch
+    ]
+
+    # Save transmission maps and their processed versions
+    for i, (img, name) in enumerate(zip(txm, file_names)):
+        save_path = os.path.join(save_dir, f"{name}")
+        save_image(img, save_path)
+
+        # Also save the processed version
+        processed = pred[i]
+        proc_path = save_path.replace(".png", "_proc.png")
+        save_image(processed, proc_path)
+
+
+def process_results(
+    images: ForwardT,
+    segmentations: SegmentationT,
+    meta_batch: list[ChexpertMeta],
+    value_ranges: ValueRangeT,
+    results,
+    save_dir=None,
+):
+    txm, weights, pred = results
+
+    if save_dir is not None:
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        run_save_path = os.path.join(save_dir, run.id)
+        os.makedirs(run_save_path, exist_ok=True)
+
+        save_results(
+            save_dir,
+            txm,
+            weights,
+            pred,
+            meta_batch,
+        )
+
+    try:
+        metrics = batch_evaluation(
+            images, txm, pred, segmentations, value_ranges
+        )
+        wandb.log(
+            {
+                **wandb_vec_metric("max_violations", metrics.max_violations),
+                **wandb_vec_metric("min_violations", metrics.min_violations),
+                **wandb_vec_metric("compliance", metrics.bound_compliance),
+                **wandb_vec_metric("psnr", metrics.psnr),
+                **wandb_vec_metric("ssim", metrics.ssim),
+                **wandb_vec_metric("penalties", metrics.penalties),
+            }
+        )
+    except Exception as e:
+        raise e
+        print("Error during batch evaluation:", e)
 
 
 @jax.jit
@@ -41,7 +140,9 @@ def get_random(
     minval, maxval = val_range
     if distribution == "normal":
         arr = jax.random.normal(key, shape=shape)
-        ratio = (arr - arr.min(axis=axis)) / (arr.max(axis=axis) - arr.min(axis=axis))
+        ratio = (arr - arr.min(axis=axis)) / (
+            arr.max(axis=axis) - arr.min(axis=axis)
+        )
         arr = ratio * (maxval - minval) + minval
     else:
         arr = jax.random.uniform(key, minval=minval, maxval=maxval, shape=shape)
@@ -231,7 +332,9 @@ def center_crop_with_aspect_ratio(image, target_size=(512, 512)):
             cropped, target_size + (c,), preserve_range=True, anti_aliasing=True
         )
     else:
-        resized = resize(cropped, target_size, preserve_range=True, anti_aliasing=True)
+        resized = resize(
+            cropped, target_size, preserve_range=True, anti_aliasing=True
+        )
 
     return resized.astype(image.dtype)
 
@@ -249,7 +352,9 @@ def preprocess_chexpert_batch(
     Returns:
         Batch of preprocessed images with consistent dimensions
     """
-    return np.array([center_crop_with_aspect_ratio(img, target_size) for img in images])
+    return np.array(
+        [center_crop_with_aspect_ratio(img, target_size) for img in images]
+    )
 
 
 def cap_resize(img: MatLike, max_dim: int) -> MatLike:
@@ -278,11 +383,6 @@ def experiment_args(**arguments):
     return parse_args
 
 
-def save_image(img, path: str, bits: int = 8):
-    x = ops.range_normalize(img)
-    cv2.imwrite(path, np.array(x * 2**bits, dtype=BIT_DTYPES[bits]))
-
-
 def pull_image(img, bits=8, logger=wandb.log):
     rng = 2**bits - 1
     dtype = BIT_DTYPES[bits]
@@ -300,7 +400,9 @@ def log_image(label: str, img, bits=8, logger=wandb.log):
 
 
 def log_run_metrics(run, metrics, prefix):
-    prefixed_metrics = {f"{prefix}{key}": value for key, value in metrics.items()}
+    prefixed_metrics = {
+        f"{prefix}{key}": value for key, value in metrics.items()
+    }
     for key, value in prefixed_metrics.items():
         run.summary[key] = value
 
@@ -336,7 +438,8 @@ def build_optim_runner(w0_builder, operator, loss_fn, **opt_params_high):
         operator_params = operator.keys
         missing_params = set(operator_params) - set(w0.keys())
         assert len(missing_params) == 0, (
-            "Initial weights missing for operator params: " + ", ".join(missing_params)
+            "Initial weights missing for operator params: "
+            + ", ".join(missing_params)
         )
 
         opt_params = dict_merge(def_opt_params, opt_params_high, opt_params)
@@ -345,7 +448,10 @@ def build_optim_runner(w0_builder, operator, loss_fn, **opt_params_high):
             "Optimization params: ",
             {k: v for k, v in opt_params.items() if k not in ["target", "w0"]},
         )
-        print("initial weights:", {k: v for k, v in w0.items() if k not in ["image"]})
+        print(
+            "initial weights:",
+            {k: v for k, v in w0.items() if k not in ["image"]},
+        )
         print("image stats:", w0["image"].mean())
         print("targetstats:", target.mean())
         return base_optimize(**opt_params)
@@ -381,6 +487,12 @@ def get_sweep_step(
             # recovere
 
             if end_cb:
-                end_cb(true_raw, target, recovered, forward=forward_op, loss_fn=loss_fn)
+                end_cb(
+                    true_raw,
+                    target,
+                    recovered,
+                    forward=forward_op,
+                    loss_fn=loss_fn,
+                )
 
     return optimize
