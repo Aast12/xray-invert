@@ -406,7 +406,7 @@ def wandb_experiment(
 
     wandb.log({"samples": samples_tables})
 
-    return txm, weights, pred
+    return txm, weights, pred, segmentations
 
 
 def run_processing(
@@ -444,6 +444,8 @@ def run_processing(
         print("Error during experiment:", e)
         return
 
+    results, segmentations = results[:-1], results[-1]
+
     assert results is not None
     process_results(images, segmentations, meta_batch, value_ranges, results)
 
@@ -474,7 +476,7 @@ def sweep_based_exec(
                 "total_variation": {"min": 0.1, "max": 0.5},
                 "prior_weight": {"min": 0.1, "max": 0.5},
                 # "gmse_weight": {"min": 0.0, "max": 0.5},
-                "gmse_weight": {"value": 0.0},
+                "gmse_weight": {"min": 0.0, "max": 1.0},
                 "PRNGKey": {"values": [0, 42]},
                 "tm_init_params": {
                     "values": [
@@ -536,7 +538,7 @@ def single_experiment(
     value_ranges = jnp.array(value_ranges, dtype=DTYPE)
     images = jnp.array(images, dtype=DTYPE).squeeze(1)
 
-    txm, weights, pred = wandb_experiment(
+    txm, weights, pred, segmentations = wandb_experiment(
         images,
         segmentations,
         value_ranges,

@@ -61,6 +61,7 @@ def compute_single_mask_penalty(
 
     # region_values = txm[mask.astype(bool)]
     region_values = txm * mask
+
     region_size = jnp.sum(mask, axis=(-2, -1))
 
     below_min_capped = jnp.maximum(0.0, min_val - region_values)
@@ -146,7 +147,6 @@ def detached_segmentation_sq_penalty(
 ):
     penalties = jnp.ones((value_ranges.shape[0], txm.shape[0]))
 
-    jax.debug.print("penalties shape: {x}", x=penalties.shape)
     # TODO: possibly improve by making broadcast operations
     for mask_id, val_range in enumerate(value_ranges):
         mask = segmentation[:, mask_id]
@@ -155,19 +155,14 @@ def detached_segmentation_sq_penalty(
         region_values = txm * mask
         region_size = jnp.sum(mask, axis=(-2, -1))
 
-        jax.debug.print("region size: {x}", x=region_size.shape)
-
         below_min = jnp.maximum(0.0, min_val - region_values) ** 2
         above_max = jnp.maximum(0.0, region_values - max_val) ** 2
 
         region_penalty = (below_min + above_max) / (
             jnp.expand_dims(region_size, (1, 2)) + 1e6
         )
-        jax.debug.print("region penalty: {x}", x=region_penalty.shape)
         penalties = penalties.at[mask_id].set(
             jnp.sum(region_penalty, axis=(-2, -1))
         )
-
-    jax.debug.print("penalties shape: {x}", x=penalties.shape)
 
     return penalties
