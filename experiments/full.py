@@ -84,15 +84,21 @@ def single_forward(
     image: TransmissionMapT, weights: WeightsT
 ) -> Float[Array, "*batch rows cols"]:
     """Forward processing function that converts transmission maps to processed X-rays"""
+    # jax.debug.print('min {x} max {y} weights {z}', x=image.min(), y=image.max(), z=weights)
     x = ops.negative_log(image)
+    # jax.debug.print("neglog max {x} min {y}", x=x.max(), y=x.min())
     x = ops.window(
         x, weights["window_center"], weights["window_width"], weights["gamma"]
     )
+    # jax.debug.print("window max {x} min {y}", x=x.max(), y=x.min())
     x = ops.range_normalize(x)
+    # jax.debug.print("range_normalize max {x} min {y}", x=x.max(), y=x.min())
     x = ops.unsharp_masking(
         x, weights["low_sigma"], weights["low_enhance_factor"]
     )
+    # jax.debug.print("unsharp_masking max {x} min {y}", x=x.max(), y=x.min())
     x = ops.clipping(x)
+    # jax.debug.print("clipping max {x} min {y}", x=x.max(), y=x.min())
 
     return x
 
@@ -183,6 +189,9 @@ def segmentation_projection(
         {
             "low_sigma": proj.box(0.1, 10),
             "low_enhance_factor": proj.box(0.1, 1.0),
+            "gamma": proj.box(1, 20),
+            "window_center": proj.box(0.1, 0.8),
+            "window_width": proj.box(0.1, 1.0),
         },
     )
 
@@ -325,9 +334,9 @@ def wandb_experiment(
     w0 = {
         "low_sigma": 4.0,
         "low_enhance_factor": 0.5,
-        "window_center": 0.5,
-        "window_width": 0.8,
-        "gamma": 1.2,
+        "window_center": 0.2,
+        "window_width": 0.2,
+        "gamma": 5,
     }
     #     for _ in range(images.shape[0])
     # ]
@@ -477,7 +486,7 @@ def sweep_based_exec(
                 "prior_weight": {"min": 0.0, "max": 1.0},
                 # "gmse_weight": {"min": 0.0, "max": 0.,
                 "gmse_weight": {"min": 0.0, "max": 1.0},
-                "PRNGKey": {"values": [0, 42]},
+                "PRNGKey": {"value": 0},
                 "tm_init_params": {
                     "values": [
                         *list(
@@ -518,7 +527,7 @@ def sweep_based_exec(
     wandb.agent(
         sweep_id,
         function=sweep_runner,
-        count=20,
+        count=200,
     )
 
 
@@ -578,15 +587,17 @@ if __name__ == "__main__":
     args = args_spec()
 
     # sweep based config
-    PROJECT = "per-image-operators"
-    SWEEP_NAME = "include-gmse-allow-zeroes"
-    FWD_DESC = "negative log, windowing, range normalization, unsharp masking, clipping"
+    PROJECT = "full-search"
+    SWEEP_NAME = "full-sweep"
+    FWD_DESC = "normalized negative log, windowing, range normalization, unsharp masking, clipping"
 
     TAGS = [
         "segmentation-guided",
         "square-penalty",
         "fixed",
         "gmse",
+        "valid",
+        f"batch_size={args.batch_size}",
         *[f.strip() for f in FWD_DESC.split(",")],
     ]
 

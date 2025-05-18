@@ -369,7 +369,7 @@ def run_processing(
     run_init={},
     save_dir=None,
 ):
-    """Main processing function to recover transmission maps with segmentation guidance"""
+    """Main processingfunction to recover transmission maps with segmentation guidance"""
     run = wandb.init(**run_init)
     hyperparams = run.config
 

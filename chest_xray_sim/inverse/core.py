@@ -18,7 +18,9 @@ SegLossFnT = Callable[
 ]
 ForwardFnT = Callable[[BatchT, WeightsT], BatchT]
 ProjectFnT = Callable[[PyTree, WeightsT], tuple[PyTree, WeightsT]]
-SegProjectFnT = Callable[[PyTree, WeightsT, SegmentationT], tuple[PyTree, WeightsT]]
+SegProjectFnT = Callable[
+    [PyTree, WeightsT, SegmentationT], tuple[PyTree, WeightsT]
+]
 
 OptimizationRetT = Union[
     tuple[tuple[PyTree, PyTree], list[float]], tuple[None, list[float]]
@@ -67,7 +69,9 @@ def base_optimize(
         tx_maps, weights = state
 
         loss_value_and_grad = jax.value_and_grad(loss_call, argnums=(0, 1))
-        loss, (weight_grads, tx_grads) = loss_value_and_grad(weights, tx_maps, target)
+        loss, (weight_grads, tx_grads) = loss_value_and_grad(
+            weights, tx_maps, target
+        )
         grads = (tx_grads, weight_grads)
 
         updates, new_opt_state = optimizer.update(grads, opt_state)

@@ -4,11 +4,11 @@ from typing import get_args, overload
 import jax
 import jax.numpy as jnp
 import torch
-from torch import Tensor
 import torchxrayvision as xrv
+from jaxtyping import Array, Float, Integer
+from torch import Tensor
 from torchvision.transforms import v2
 from torchxrayvision.baseline_models.chestx_det import PSPNet
-from jaxtyping import Array, Float, Integer
 
 ArrayT = typing.Union[Array, Tensor]
 
@@ -109,17 +109,23 @@ def _join_masks(
     threshold=None,
 ):
     aggregated = (
-        torch.sigmoid(pred.sum(dim=0))
-        if isinstance(pred, torch.Tensor)
-        else jax.nn.sigmoid(pred.sum(axis=0))
+        jax.nn.sigmoid(pred) if isinstance(pred, Array) else torch.sigmoid(pred)
     )
 
     if threshold is not None:
         if isinstance(pred, Array):
             aggregated = jnp.where(aggregated < threshold, 0, 1)
+        elif isinstance(pred, Tensor):
+            aggregated = torch.where(aggregated < threshold, 0, 1)
         else:
-            aggregated[aggregated < threshold] = 0
-            aggregated[aggregated >= threshold] = 1
+            raise TypeError(f"Unsupported type {type(pred)}")
+
+    if isinstance(aggregated, Array):
+        aggregated = aggregated.sum(axis=0).clip(0, 1)
+    elif isinstance(aggregated, Tensor):
+        aggregated = aggregated.sum(dim=0).clip(0, 1)
+    else:
+        raise TypeError(f"Unsupported type {type(pred)}")
 
     return aggregated
 
@@ -139,19 +145,29 @@ def _batch_join_masks(
     threshold: float | None = None,
 ) -> Array | Tensor:
     if isinstance(pred, Array):
-        aggregated = jax.nn.sigmoid(pred.sum(axis=1, keepdims=True))
+        normalized = jax.nn.sigmoid(pred)
         if threshold is not None:
-            aggregated = jnp.where(aggregated < threshold, 0, 1)
-        return aggregated
+            thresholded = jnp.where(normalized >= threshold, 1, 0)
+            return thresholded.sum(axis=1, keepdims=True).clip(0, 1)
+        else:
+            # TODO: verify
+            normalized = normalized.sum(axis=1, keepdims=True)
+            return normalized.clip(0, 1)
+
     elif isinstance(pred, Tensor):
-        aggregated = torch.sigmoid(pred.sum(dim=1, keepdim=True))
+        aggregated = torch.sigmoid(pred)
         if threshold is not None:
             aggregated[aggregated < threshold] = 0
             aggregated[aggregated >= threshold] = 1
+            aggregated = aggregated.sum(dim=1, keepdim=True)
+            return aggregated.clip(0, 1)
+        else:
+            # TODO: verify
+            return aggregated.sum(dim=1, keepdim=True).clip(0, 1)
 
-        return aggregated
-
-    raise ValueError(f"Unsupported type {type(pred)}. Expected Array or Tensor.")
+    raise ValueError(
+        f"Unsupported type {type(pred)}. Expected Array or Tensor."
+    )
 
 
 class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
@@ -167,7 +183,9 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
         super(ChestSegmentation, self).__init__(**kwargs)
 
     def forward(self, x):
-        return super(ChestSegmentation, self).forward(ChestSegmentation.preprocess(x))
+        return super(ChestSegmentation, self).forward(
+            ChestSegmentation.preprocess(x)
+        )
 
     def __call__(self, x):
         with torch.inference_mode():
@@ -191,6 +209,7 @@ class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
         return pred[cls.targets_dict[label]]
 
 
+# TODO: refactor get_group_mask and batched versin
 @overload
 def get_group_mask(
     pred: Float[Array, "batch_size num_clases height width"],
@@ -223,9 +242,9 @@ def get_group_mask(
         q = jnp.array(q)
 
     if isinstance(pred, Array):
-        return _join_masks(jax.nn.sigmoid(pred[q]), threshold)
+        return _join_masks(pred[q], threshold)
     else:
-        return _join_masks(torch.sigmoid(pred[q]), threshold)
+        return _join_masks(pred[q], threshold)
 
 
 @overload
@@ -260,26 +279,25 @@ def batched_get_group_mask(
         q = jnp.array(q)
 
     if isinstance(pred, Array):
-        return _batch_join_masks(jax.nn.sigmoid(pred[:, q]), threshold)
+        return _batch_join_masks(pred[:, q], threshold)
     else:
-        return _batch_join_masks(torch.sigmoid(pred[:, q]), threshold)
+        return _batch_join_masks(pred[:, q], threshold)
 
 
 def batch_get_exclusive_masks(
     pred: Float[Array, "batch labels height width"],
     threshold: float | None = None,
-) -> tuple[list[MaskGroupsT], Float[Array, "batch reduced_labels height width"]]:
+) -> tuple[
+    list[MaskGroupsT], Float[Array, "batch reduced_labels height width"]
+]:
     ordered_groups = MASK_GROUPS
     # TODO: rewrite for group of masks?
     complete_masks = [
-        batched_get_group_mask(pred, group, threshold) for group in ordered_groups
+        batched_get_group_mask(pred, group, threshold)
+        for group in ordered_groups
     ]
 
     complete_masks = jnp.concat(complete_masks, axis=1)
-
-    # complete_masks: Float[Array, "batch labels height width"] = batched_get_group_mask(
-    #     pred, MASK_GROUPS, threshold
-    # )
 
     exclusive_masks = complete_masks.copy()
     for i in range(complete_masks.shape[1]):
@@ -303,7 +321,9 @@ def get_exclusive_masks(
     threshold: float | None = None,
 ) -> dict[MaskGroupsT, Array]:
     print("getting exclusive masks", pred.shape)
-    complete_masks = [get_group_mask(pred, group, threshold) for group in MASK_GROUPS]
+    complete_masks = [
+        get_group_mask(pred, group, threshold) for group in MASK_GROUPS
+    ]
 
     exclusive_masks = []
     for i, mask in enumerate(complete_masks):
@@ -313,7 +333,9 @@ def get_exclusive_masks(
 
         exclusive_masks.append(exclusive_mask)
 
-    return {group_id: mask for group_id, mask in zip(MASK_GROUPS, exclusive_masks)}
+    return {
+        group_id: mask for group_id, mask in zip(MASK_GROUPS, exclusive_masks)
+    }
 
 
 if __name__ == "__main__":

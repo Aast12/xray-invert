@@ -1,6 +1,5 @@
 from functools import partial
 
-import dm_pix as dmp
 import jax
 import jax.numpy as jnp
 from dm_pix import gaussian_blur
@@ -11,16 +10,28 @@ Image = Float[Array, "*batch rows cols"]
 
 @partial(jax.jit, static_argnums=(1,))
 def negative_log(image: Image, eps=1e-6):
-    return -jnp.log(jnp.maximum(image, eps))
+    x = -jnp.log(jnp.maximum(image, eps))
+    return x / (-jnp.log(eps))
 
 
 @jax.jit
-def windowing(image: Image, window_center: Scalar, window_width: Scalar, gamma: Scalar):
+def windowing(
+    image: Image, window_center: Scalar, window_width: Scalar, gamma: Scalar
+):
     x = image
     x = (x - window_center) / window_width
     x = jax.nn.sigmoid(x) ** gamma
 
     return x
+
+
+# @jax.jit
+def window(
+    image: Image, window_center: Scalar, window_width: Scalar, gamma: Scalar
+):
+    x = image
+    x = (x - window_center) / window_width
+    return jax.nn.sigmoid(x * gamma)
 
 
 @jax.jit
@@ -63,10 +74,12 @@ def clipping(image):
 @jax.jit
 def range_normalize(image: Image):
     x = image
-    return (x - x.min()) / (x.max() - x.min())
+    return (x - x.min(axis=(-2, -1))) / (
+        x.max(axis=(-2, -1)) - x.min(axis=(-2, -1))
+    )
 
 
 @jax.jit
 def max_normalize(image: Image):
     x = image
-    return x / x.max()
+    return x / x.max(axis=(-2, -1))

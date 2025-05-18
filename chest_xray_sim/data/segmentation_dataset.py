@@ -8,7 +8,6 @@ from chest_xray_sim.data.chexpert_dataset import ChexpertDataset, ChexpertMeta
 from chest_xray_sim.data.segmentation import (
     ChestSegmentation,
     get_group_mask,
-    substract_mask,
 )
 from chest_xray_sim.data.utils import get_chexpert_transform
 
@@ -73,7 +72,9 @@ class SegmentationChexpertDataset(ChexpertDataset):
             return torch.load(mask_path)
 
         pred = self.seg_model(image)[0]
-        assert pred.ndim == 3, f"Segmentation model returned {pred.ndim}D tensor."
+        assert pred.ndim == 3, (
+            f"Segmentation model returned {pred.ndim}D tensor."
+        )
 
         if mask_path:
             os.makedirs(os.path.dirname(mask_path), exist_ok=True)
