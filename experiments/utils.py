@@ -85,10 +85,10 @@ def process_results(
 
     if save_dir is not None:
         if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
+            os.makedirs(save_dir, exist_ok=True)
 
-        run_save_path = os.path.join(save_dir, run.id)
-        os.makedirs(run_save_path, exist_ok=True)
+        # run_save_path = os.path.join(save_dir, run.id)
+        # os.makedirs(run_save_path, exist_ok=True)
 
         save_results(
             save_dir,

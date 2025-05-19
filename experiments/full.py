@@ -187,8 +187,8 @@ def segmentation_projection(
     new_weights_state = proj.projection_spec(
         new_weights_state,
         {
-            "low_sigma": proj.box(0.1, 10),
-            "low_enhance_factor": proj.box(0.1, 1.0),
+            "low_sigma": proj.box(0.5, 10),
+            "low_enhance_factor": proj.box(0.3, 1.0),
             "gamma": proj.box(1, 20),
             "window_center": proj.box(0.1, 0.8),
             "window_width": proj.box(0.1, 1.0),
@@ -386,7 +386,7 @@ def wandb_experiment(
     pred = forward(txm, weights)
 
     # Log recovered parameters
-    summary({"recovered_params": weights})
+    logger({"recovered_params": weights})
 
     for idx in range(images.shape[0]):
         curr_image = txm[idx]
@@ -456,7 +456,16 @@ def run_processing(
     results, segmentations = results[:-1], results[-1]
 
     assert results is not None
-    process_results(images, segmentations, meta_batch, value_ranges, results)
+    save_dir = os.path.join(save_dir, run.id) if save_dir is not None else None
+
+    process_results(
+        images,
+        segmentations,
+        meta_batch,
+        value_ranges,
+        results,
+        save_dir=save_dir,
+    )
 
 
 def sweep_based_exec(
