@@ -4,6 +4,7 @@ import os
 from typing import Any, Literal
 
 import cv2
+import initialization as init
 import jax
 import jax.numpy as jnp
 import joblib
@@ -11,11 +12,13 @@ import numpy as np
 from cv2.typing import MatLike
 from eval import batch_evaluation
 from jaxtyping import Array, Float, Scalar
+from logging_utils import log_priors_table, summary
 from skimage.transform import resize
 
 import chest_xray_sim.inverse.operators as ops
 import wandb
 from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
+from chest_xray_sim.data.segmentation import batch_get_exclusive_masks
 from chest_xray_sim.inverse.core import base_optimize
 from chest_xray_sim.types import (
     ForwardT,
@@ -26,6 +29,80 @@ from chest_xray_sim.types import (
 )
 
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
+
+
+def chexpert_filenames(meta_batch):
+    return [
+        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
+        for m in meta_batch
+    ]
+
+
+def save_results(
+    save_dir: str,
+    txm: TransmissionMapT,
+    weights: WeightsT,
+    pred: TransmissionMapT,
+    file_names: list[str],
+):
+    joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
+
+    # Save transmission maps and their processed versions
+    for i, (img, name) in enumerate(zip(txm, file_names)):
+        save_path = os.path.join(save_dir, f"{name}")
+        save_image(img, save_path)
+
+        # Also save the processed version
+        processed = pred[i]
+        proc_path = save_path.replace(".png", "_proc.png")
+        save_image(processed, proc_path)
+
+
+def build_segmentation_model_inputs(
+    images: Float[Array, "batch rows cols"],
+    segmentations: Float[Array, "batch rows cols"],
+    value_ranges: Float[Array, "labels 2"],
+    hyperparams: Any,
+    segmentation_th=0.6,
+):
+    seg_labels, segmentations = batch_get_exclusive_masks(
+        segmentations, segmentation_th
+    )
+    log_priors_table(seg_labels, value_ranges)
+    init_mode, init_params = init.parse_init_params(hyperparams, images)
+    summary({"init_mode": init_mode})
+
+    txm0 = init.initialize(hyperparams.PRNGKey, images.shape, **init_params)
+
+    w0 = full_pytree(
+        {
+            "low_sigma": 4.0,
+            "low_enhance_factor": 0.5,
+            "window_center": 0.2,
+            "window_width": 0.2,
+            "gamma": 5,
+        },
+        images.shape[0],
+        jnp.float32,
+    )
+
+    return txm0, w0
+
+
+def full_pytree(w0, shape, dtype=jnp.float32):
+    return {k: jnp.full(shape, v, dtype=dtype) for k, v in w0.items()}
+
+
+def sample_random(size: int, log_samples: int | None = None):
+    if log_samples is None:
+        log_samples = size
+
+    log_samples = min(log_samples, size)
+
+    rand_samples = np.random.randint(0, size, size=log_samples).tolist()
+    rand_samples = sorted(rand_samples)
+
+    return rand_samples
 
 
 def wandb_vec_metric(id: str, data: Array):
@@ -46,33 +123,6 @@ def save_image(img, path: str, bits=8):
     )
 
 
-def save_results(
-    save_dir: str,
-    txm: TransmissionMapT,
-    weights: WeightsT,
-    pred: TransmissionMapT,
-    meta_batch: list[ChexpertMeta],
-):
-    joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
-    joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
-
-    # Create file names from metadata
-    file_names = [
-        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
-        for m in meta_batch
-    ]
-
-    # Save transmission maps and their processed versions
-    for i, (img, name) in enumerate(zip(txm, file_names)):
-        save_path = os.path.join(save_dir, f"{name}")
-        save_image(img, save_path)
-
-        # Also save the processed version
-        processed = pred[i]
-        proc_path = save_path.replace(".png", "_proc.png")
-        save_image(processed, proc_path)
-
-
 def process_results(
     images: ForwardT,
     segmentations: SegmentationT,
@@ -89,13 +139,11 @@ def process_results(
 
         # run_save_path = os.path.join(save_dir, run.id)
         # os.makedirs(run_save_path, exist_ok=True)
+        joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
+        joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
 
         save_results(
-            save_dir,
-            txm,
-            weights,
-            pred,
-            meta_batch,
+            save_dir, txm, weights, pred, chexpert_filenames(meta_batch)
         )
 
     try:

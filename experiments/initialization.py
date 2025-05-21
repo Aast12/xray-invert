@@ -1,7 +1,8 @@
-from typing import Literal
+from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
+from jaxtyping import Array, Float
 
 DTYPE = jnp.float32
 
@@ -47,6 +48,20 @@ def _range_init(
     return arr
 
 
+def parse_init_params(
+    hyperparams: Any, images: Float[Array, "batch rows cols"]
+):
+    init_mode, init_config = hyperparams.tm_init_params
+
+    init_params: dict[str, Any] = dict(mode=init_mode)
+    if init_mode in ["uniform", "normal"]:
+        init_params["val_range"] = init_config
+    elif init_mode in ["target", "negative"]:
+        init_params["target"] = images
+
+    return init_mode, init_params
+
+
 def initialize(
     seed: int,
     shape: tuple[int, ...] = (),
@@ -71,6 +86,7 @@ def initialize(
         raise ValueError(f"Unknown initialization mode: {mode}")
 
 
+# deprecated
 def get_random(
     key: int,
     shape: tuple[int, ...],

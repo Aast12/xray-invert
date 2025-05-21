@@ -1,13 +1,13 @@
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, TypedDict
+from typing import Callable, TypedDict
 
-import initialization as init
 import jax
 import jax.numpy as jnp
 import joblib
 import numpy as np
 import optax
+from experiments.models import ExperimentInputs
 import projections as proj
 import yaml
 from eval import batch_evaluation
@@ -22,10 +22,12 @@ from segmentation_utils import get_priors
 from torch import Tensor
 from utils import (
     basic_loss_logger,
+    build_segmentation_model_inputs,
     empty_loss_logger,
     experiment_args,
     process_results,
     pull_image,
+    sample_random,
     save_image,
 )
 
@@ -33,6 +35,7 @@ import chest_xray_sim.inverse.operators as ops
 import wandb
 from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
 from chest_xray_sim.data.segmentation import (
+    MaskGroupsT,
     batch_get_exclusive_masks,
 )
 from chest_xray_sim.data.segmentation_dataset import (
@@ -40,6 +43,7 @@ from chest_xray_sim.data.segmentation_dataset import (
 )
 from chest_xray_sim.inverse.core import segmentation_optimize
 from chest_xray_sim.types import TransmissionMapT
+from logging_utils import empty_logger, log_image_histograms, summary
 
 DEBUG = True
 DTYPE = jnp.float32
@@ -69,6 +73,8 @@ class ForwardParams(TypedDict):
 
 
 WeightsT = PyTree[ForwardParams]
+
+
 
 args_spec = experiment_args(
     batch_size=32,
@@ -192,62 +198,22 @@ def make_projection(spec):
     return segmentation_projection
 
 
-def save_results(
-    save_dir: str,
-    txm: TransmissionMapT,
-    weights: WeightsT,
-    pred: TransmissionMapT,
-    meta_batch: list[ChexpertMeta],
-):
-    joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
-    joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
-
-    # Create file names from metadata
-    file_names = [
-        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
-        for m in meta_batch
-    ]
-
-    # Save transmission maps and their processed versions
-    for i, (img, name) in enumerate(zip(txm, file_names)):
-        save_path = os.path.join(save_dir, f"{name}")
-        save_image(img, save_path)
-
-        # Also save the processed version
-        processed = pred[i]
-        proc_path = save_path.replace(".png", "_proc.png")
-        save_image(processed, proc_path)
-
-
-def empty_logger(body):
-    pass
-
-
 def wandb_experiment(
-    images: Float[Array, "batch height width"],
-    masks_batch: Float[Array, "batch labels height width"],
-    value_ranges: Float[Array, "reduced_labels 2"],
+    inputs: ExperimentInputs,
     hyperparams: ExperimentArgs,
     logger: Callable[[dict], None] = empty_logger,
     loss_logger=empty_loss_logger,
-    summary=empty_logger,
     segmentation_th=0.6,
     log_samples=5,
 ):
     """Main processing function to recover transmission maps with segmentation guidance"""
 
-    log_samples = min(log_samples, images.shape[0])
+    images = inputs.images
+    segmentations = inputs.segmentations
+    seg_labels = inputs.prior_labels
+    value_ranges = inputs.priors
 
-    seg_labels, segmentations = batch_get_exclusive_masks(
-        masks_batch, segmentation_th
-    )
-
-    priors_table = wandb.Table(columns=["region", "min", "max"])
-    for region, value_range in zip(seg_labels, value_ranges):
-        min_val, max_val = value_range
-        priors_table.add_data(region, min_val, max_val)
-
-    wandb.log({"priors": priors_table})
+    rand_samples = sample_random(images.shape[0], log_samples)
 
     summary(
         {
@@ -256,93 +222,10 @@ def wandb_experiment(
         }
     )
 
-    rand_samples = np.random.randint(
-        0, images.shape[0], size=log_samples
-    ).tolist()
-    rand_samples = sorted(rand_samples)
 
-    samples_tables = wandb.Table(columns=["index", "Image"])
+    log_image_histograms(images, segmentations, seg_labels)
 
-    mask_labels = {i + 1: label for i, label in enumerate(seg_labels)}
-    for idx in range(images.shape[0]):
-        curr_image = images[idx]
-        curr_masks = segmentations[idx]
 
-        image_histogram = wandb.Histogram(curr_image.flatten())
-        logger({"image histogram": image_histogram})
-        for i, label in mask_labels.items():
-            mask_idx = i - 1
-            mask = curr_masks[mask_idx]
-            logger(
-                {
-                    f"image ({label}) histogram": wandb.Histogram(
-                        curr_image[mask.astype(jnp.bool)].flatten()
-                    )
-                }
-            )
-
-    for idx in rand_samples:
-        curr_image = images[idx]
-        curr_masks = segmentations[idx]
-        general_mask = jnp.zeros_like(curr_masks[idx])
-
-        for i, label in mask_labels.items():
-            mask_idx = i - 1
-            mask = curr_masks[mask_idx]
-            general_mask = general_mask + mask * i
-        # Only log full images for random samples
-        masked_image = wandb.Image(
-            pull_image(curr_image),
-            masks={
-                "predictions": {
-                    "mask_data": np.array(general_mask),
-                    "class_labels": mask_labels,
-                },
-            },
-        )
-        row_data = [idx, masked_image]
-        samples_tables.add_data(*row_data)
-
-    print("sample size:", log_samples)
-    print("logged samples:", len(samples_tables.data))
-
-    # Initialize transmission map with appropriate range
-    init_mode, init_config = hyperparams.tm_init_params
-
-    init_params: dict[str, Any] = dict(mode=init_mode)
-    if init_mode in ["uniform", "normal"]:
-        init_params["val_range"] = init_config
-    elif init_mode in ["target", "negative"]:
-        init_params["target"] = images
-
-    summary({"init_mode": init_mode})
-
-    print("using init params:", hyperparams.tm_init_params)
-    print("using init config:", init_params)
-
-    txm0 = init.initialize(hyperparams.PRNGKey, images.shape, **init_params)
-
-    # Initial parameters for the forward model, should yield a proper image processing
-    # for constant weights
-    # TODO: long-term: automatic DIP parameter selection
-    w0 = {
-        "low_sigma": 4.0,
-        "low_enhance_factor": 0.5,
-        "window_center": 0.2,
-        "window_width": 0.2,
-        "gamma": 5,
-    }
-    #     for _ in range(images.shape[0])
-    # ]
-    # w0 = [{k: jnp.array(v, dtype=jnp.float32) for k, v in w.items()} for w in w0]
-    # w0 = {k: jnp.full((txm0.shape[0]), v, dtype=jnp.float32) for k, v in w0.items()}
-
-    # TODO: gaussian blur enforces a conversion to float32, requires parameters to match the type
-    # HACK: this is a bit hacky, the most straightforward to broadcast the original single parameter dict
-    # is to make each value an array in a broadcastable shape, txm has 3 dimensions [batch rows cols]
-    w0 = {
-        k: jnp.full(txm0.shape[0], v, dtype=jnp.float32) for k, v in w0.items()
-    }
 
     def loss_fn(*args):
         return segmentation_loss(
@@ -392,6 +275,29 @@ def wandb_experiment(
     # Log recovered parameters
     logger({"recovered_params": weights})
 
+    samples_tables = wandb.Table(columns=["index", "Image"])
+    for idx in rand_samples:
+        curr_image = images[idx]
+        curr_masks = segmentations[idx]
+        general_mask = jnp.zeros_like(curr_masks[idx])
+
+        for i, label in mask_labels.items():
+            mask_idx = i - 1
+            mask = curr_masks[mask_idx]
+            general_mask = general_mask + mask * i
+        # Only log full images for random samples
+        masked_image = wandb.Image(
+            pull_image(curr_image),
+            masks={
+                "predictions": {
+                    "mask_data": np.array(general_mask),
+                    "class_labels": mask_labels,
+                },
+            },
+        )
+        row_data = [idx, masked_image]
+        samples_tables.add_data(*row_data)
+
     for idx in range(images.shape[0]):
         curr_image = txm[idx]
         curr_masks = segmentations[idx]
@@ -429,27 +335,35 @@ def run_processing(
     value_ranges: Float[Array, "reduced_labels 2"],
     run_init={},
     save_dir=None,
+    segmentation_th=0.6,
 ):
     """Main processing function to recover transmission maps with segmentation guidance"""
     run = wandb.init(**run_init)
     hyperparams = run.config
 
+    # get model inputs
     results = None
-    images = jnp.array(images_batch.cpu().numpy()).squeeze(1)
-    segmentations = jnp.array(masks_batch.cpu().numpy())
-
-    def summary(body):
-        for k, v in body.items():
-            run.summary[k] = v
+    images =
+    segmentations =
+    seg_labels, segmentations = batch_get_exclusive_masks(
+        segmentations, segmentation_th
+    )
 
     try:
+        txm0, w0 = build_segmentation_model_inputs(
+            images, segmentations, value_ranges, hyperparams
+        )
+
+        inputs = ExperimentInputs(
+            images=jnp.array(images_batch.cpu().numpy()).squeeze(1),
+            segmentations=jnp.array(masks_batch.cpu().numpy()),
+            prior_labels=seg_labels,
+            priors=value_ranges)
+
         results = wandb_experiment(
-            images,
-            segmentations,
-            value_ranges=value_ranges,
+            inputs,
             hyperparams=hyperparams,
             logger=wandb.log,
-            summary=summary,
             loss_logger=basic_loss_logger,
         )
     except Exception as e:
