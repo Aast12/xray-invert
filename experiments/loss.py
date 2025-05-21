@@ -24,11 +24,15 @@ def total_variation(pred: ForwardT):
 
 
 @functools.partial(jax.jit, static_argnums=(2))
-def unsharp_mask_similarity(pred, target, sigma=3.0):
+def unsharp_mask_similarity(
+    pred: Float[Array, "batch height width"],
+    target: Float[Array, "batch height width"],
+    sigma=3.0,
+):
     x_detail = (
         pred
         - dmp.gaussian_blur(
-            jnp.expand_dims(pred, axis=2),
+            jnp.expand_dims(pred, axis=-3),
             sigma,
             kernel_size=int(2 * sigma),
             padding="SAME",
@@ -37,7 +41,7 @@ def unsharp_mask_similarity(pred, target, sigma=3.0):
     y_detail = (
         target
         - dmp.gaussian_blur(
-            jnp.expand_dims(target, axis=2),
+            jnp.expand_dims(target, axis=-3),
             sigma,
             kernel_size=int(2 * sigma),
             padding="SAME",
