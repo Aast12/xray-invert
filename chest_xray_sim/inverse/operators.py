@@ -36,7 +36,7 @@ def window(
 
 @jax.jit
 def low_pass(image: Image, sigma: float):
-    x = jnp.expand_dims(image, axis=2)
+    x = jnp.expand_dims(image, axis=-3)
     kernel_size = 2 * sigma
     blurred = gaussian_blur(x, sigma, kernel_size, padding="same")
 
@@ -55,11 +55,9 @@ def unsharp_masking_alt(image: Image, sigma: float, enhance_factor: float):
 
 
 def unsharp_masking(image: Image, sigma: float, enhance_factor: float):
-    x = jnp.expand_dims(image, axis=2)
+    x = jnp.expand_dims(image, axis=-3)
     kernel_size = 2 * sigma
     blurred = gaussian_blur(x, sigma, kernel_size, padding="SAME")
-
-    # blurred = dmp.pad_to_size(blurred, x.shape[0], x.shape[1], mode="reflect")
 
     x = (x - enhance_factor * blurred) / (1.0 - enhance_factor)
 
@@ -74,12 +72,13 @@ def clipping(image):
 @jax.jit
 def range_normalize(image: Image):
     x = image
-    return (x - x.min(axis=(-2, -1))) / (
-        x.max(axis=(-2, -1)) - x.min(axis=(-2, -1))
+    return (x - x.min(axis=(-2, -1), keepdims=True)) / (
+        x.max(axis=(-2, -1), keepdims=True)
+        - x.min(axis=(-2, -1), keepdims=True)
     )
 
 
 @jax.jit
 def max_normalize(image: Image):
     x = image
-    return x / x.max(axis=(-2, -1))
+    return x / x.max(axis=(-2, -1), keepdims=True)

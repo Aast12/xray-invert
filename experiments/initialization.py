@@ -1,9 +1,10 @@
-from typing import Literal, overload
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
 
 DTYPE = jnp.float32
+
 
 def generate_range_normal(
     key: jax.Array,
@@ -14,7 +15,9 @@ def generate_range_normal(
 ) -> jax.Array:
     minval, maxval = val_range
     arr = jax.random.normal(key, shape=shape, dtype=DTYPE)
-    ratio = (arr - arr.min(axis=axis)) / (arr.max(axis=axis) - arr.min(axis=axis))
+    ratio = (arr - arr.min(axis=axis)) / (
+        arr.max(axis=axis) - arr.min(axis=axis)
+    )
     return ratio * (maxval - minval) + minval
 
 
@@ -27,7 +30,9 @@ def _range_init(
     **kwargs,
 ) -> jax.Array:
     arr = None
-    assert val_range is not None, "val_range must be provided for normal distribution"
+    assert val_range is not None, (
+        "val_range must be provided for normal distribution"
+    )
 
     if mode == "normal":
         return generate_range_normal(key, shape, val_range, axis, *kwargs)
@@ -51,13 +56,15 @@ def initialize(
     axis: int | None = 0,
     **kwargs,
 ) -> jax.Array:
-    arr = None
     key = jax.random.key(seed)
     if mode == "normal" or mode == "uniform":
         return _range_init(key, shape, val_range, mode, axis, *kwargs)
     elif mode == "target":
         assert target is not None, "target must be provided for copy mode"
         return target.copy().astype(DTYPE)
+    elif mode == "negative":
+        assert target is not None, "target must be provided for copy mode"
+        return 1 - target.copy().astype(DTYPE)
     elif mode == "zeros":
         return jnp.zeros(shape, dtype=DTYPE) + 1e-6
     else:
@@ -75,7 +82,9 @@ def get_random(
     minval, maxval = val_range
     if distribution == "normal":
         arr = jax.random.normal(key, shape=shape)
-        ratio = (arr - arr.min(axis=axis)) / (arr.max(axis=axis) - arr.min(axis=axis))
+        ratio = (arr - arr.min(axis=axis)) / (
+            arr.max(axis=axis) - arr.min(axis=axis)
+        )
         arr = ratio * (maxval - minval) + minval
     else:
         arr = jax.random.uniform(key, minval=minval, maxval=maxval, shape=shape)

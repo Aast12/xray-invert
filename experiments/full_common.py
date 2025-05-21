@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Any, Callable, TypedDict
 
 import initialization as init
-import jax
 import jax.numpy as jnp
 import joblib
 import numpy as np
@@ -83,7 +82,7 @@ args_spec = experiment_args(
 )
 
 
-def single_forward(
+def forward(
     image: TransmissionMapT, weights: WeightsT
 ) -> Float[Array, "*batch rows cols"]:
     """Forward processing function that converts transmission maps to processed X-rays"""
@@ -98,25 +97,6 @@ def single_forward(
     x = ops.clipping(x)
 
     return x
-
-
-def forward(image, weights):
-    """Forward processing for a batch of images with individual weights.
-
-    Args:
-        image: Batch of transmission maps
-        weights: Individual weights for each image
-
-    Returns:
-        Batch of processed images
-    """
-    results = []
-    for i in range(len(image)):
-        img_i = image[i]
-        weights_i = jax.tree.map(lambda x: x[i], weights)
-        results.append(single_forward(img_i, weights_i))
-
-    return jnp.stack(results)
 
 
 def segmentation_loss(
@@ -340,9 +320,10 @@ def wandb_experiment(
     # TODO: gaussian blur enforces a conversion to float32, requires parameters to match the type
     # HACK: this is a bit hacky, the most straightforward to broadcast the original single parameter dict
     # is to make each value an array in a broadcastable shape, txm has 3 dimensions [batch rows cols]
-    w0 = {
-        k: jnp.full(txm0.shape[0], v, dtype=jnp.float32) for k, v in w0.items()
-    }
+    summary({"initial_weights": w0})
+
+    # TODO: gaussian blur enforces a conversion to float32, requires parameters to match the type
+    w0 = {k: jnp.array(v, dtype=jnp.float32) for k, v in w0.items()}
 
     def loss_fn(*args):
         return segmentation_loss(
