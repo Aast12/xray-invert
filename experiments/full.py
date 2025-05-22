@@ -67,6 +67,9 @@ class ForwardParams(TypedDict):
 WeightsT = PyTree[ForwardParams]
 
 
+# This will be moved into our optimizer class
+
+
 args_spec = experiment_args(
     batch_size=32,
     frontal_lateral="Frontal",
@@ -106,7 +109,7 @@ class SegmentationExperiment(AbstractSegmentationExperiment):
         )
 
     def _forward(self, txm, weights):
-        """Forward processing for batches of images with individual weights."""
+        """Forward processing for a single image."""
         x = ops.negative_log(txm)
         x = ops.window(
             x,
@@ -126,7 +129,6 @@ class SegmentationExperiment(AbstractSegmentationExperiment):
 
     def forward(self, txm, weights):
         """Forward processing for batches of images with individual weights."""
-        # jax.debug.print("weights: {w}", w=weights)
         return jax.vmap(
             self._forward,
             in_axes=(
@@ -151,9 +153,13 @@ class SegmentationExperiment(AbstractSegmentationExperiment):
             common_weights=False,
         )
 
+        w0["low_sigma"] = float(4.0)
+
+        jax.debug.print("STARTING w0: {x}", x=w0)
+
         return txm0, w0
 
-    def projection(self, txm, weights, segmentation):
+    def projection(self, txm, weights, segmentation=None):
         return self.projection_fn(txm, weights)
 
     def loss_fn(

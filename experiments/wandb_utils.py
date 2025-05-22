@@ -1,25 +1,30 @@
-import functools
+# Standard library imports
 from abc import ABC, abstractmethod
-from typing import Any, Protocol, Tuple
+from typing import Any, Dict, Optional, Protocol, Tuple
 
 import initialization as init
+
+# Third-party imports
 import jax.numpy as jnp
 import optax
 import yaml
-from jaxtyping import Array, Float, PyTree, Scalar
+from jaxtyping import Array, Float, PyTree
 from logging_utils import (
     log,
     log_image_histograms,
     log_priors_table,
     log_txm_histograms,
-    summary,
+)
+from logging_utils import (
+    summary as log_summary,
 )
 from models import ExperimentInputs
 
+# Local imports
 from chest_xray_sim.inverse.core import (
     BatchT,
+    Optimizer,
     SegmentationT,
-    segmentation_optimize,
 )
 from chest_xray_sim.types import WeightsT
 
@@ -41,7 +46,7 @@ def build_segmentation_model_inputs(
 ):
     log_priors_table(seg_labels, value_ranges)
     init_mode, init_params = init.parse_init_params(hyperparams, images)
-    summary({"init_mode": init_mode})
+    log_summary({"init_mode": init_mode})
 
     txm0 = init.initialize(hyperparams.PRNGKey, images.shape, **init_params)
 
@@ -56,7 +61,8 @@ def build_segmentation_model_inputs(
         images.shape[0] if not common_weights else (),
         jnp.float32,
     )
-    w0["low_sigma"] = 4.0
+
+    w0["low_sigma"] = 4
 
     return txm0, w0
 
@@ -74,23 +80,45 @@ class ExperimentProtocol(Protocol):
     eps: float
 
 
-class AbstractSegmentationExperiment(ABC):
+class AbstractSegmentationExperiment(Optimizer, ABC):
     def __init__(
         self,
         inputs: ExperimentInputs,
         hyperparams: ExperimentProtocol,
         optimizer: optax.GradientTransformation,
     ):
+        super().__init__(
+            optimizer=optimizer,
+            constant_weights=hyperparams.constant_weights,
+            n_steps=hyperparams.n_steps,
+            eps=hyperparams.eps,
+            track_time=True,
+            log_interval=100,
+        )
         self.inputs = inputs
         self.hyperparams = hyperparams
-        self.optax = optimizer
 
     @abstractmethod
     def init_state(self) -> Tuple[BatchT, WeightsT]:
+        """Initialize the optimization state."""
         pass
 
+    def loss_logger(self, loss, *args):
+        """Legacy method for loss logging."""
+        pass
+
+    def logger(self, body):
+        """Log information using the logging utility."""
+        log(body)
+
+    def custom_summary(self, data):
+        """Log summary information using the logging utility."""
+        log_summary(data)
+
+    # Implement abstract methods from Optimizer
     @abstractmethod
     def forward(self, txm: BatchT, weights: WeightsT) -> BatchT:
+        """Forward model that converts transmission maps to processed images."""
         pass
 
     @abstractmethod
@@ -100,23 +128,38 @@ class AbstractSegmentationExperiment(ABC):
         weights: WeightsT,
         pred: BatchT,
         target: BatchT,
-        segmentation: SegmentationT,
-    ) -> Scalar:
+        segmentation: Optional[SegmentationT] = None,
+    ) -> Float[Array, ""]:
+        """Loss function to evaluate the quality of predictions."""
         pass
 
-    def loss_logger(self, loss, *args):
-        pass
+    def log(self, metrics: Dict[str, Any]):
+        """Log metrics during optimization."""
+        self.logger(metrics)
 
-    def logger(self, body):
-        log(body)
+    def summary(self, metrics: Dict[str, Any]):
+        """Log summary metrics at the end of optimization."""
+        self.custom_summary(metrics)
+        # super().summary(metrics)
 
-    def summary(self, data):
-        summary(data)
+    def project(
+        self,
+        txm: PyTree,
+        weights: WeightsT,
+        segmentation: Optional[SegmentationT] = None,
+    ) -> tuple[PyTree, WeightsT]:
+        """Project states to valid ranges based on segmentation information."""
+        return self.projection(txm, weights, segmentation)
 
+    # Additional abstract methods specific to this class
     @abstractmethod
     def projection(
-        self, txm: PyTree, weights: WeightsT, segmentation: SegmentationT
+        self,
+        txm: PyTree,
+        weights: WeightsT,
+        segmentation: Optional[SegmentationT] = None,
     ) -> Tuple[PyTree, WeightsT]:
+        """Project states to valid ranges based on segmentation information."""
         pass
 
     def run(self):
@@ -125,7 +168,7 @@ class AbstractSegmentationExperiment(ABC):
         images = self.inputs.images
         segmentations = self.inputs.segmentations
 
-        self.summary(
+        self.custom_summary(
             {
                 "segmentation_th": self.hyperparams.segmentation_th,
                 "viz_samples": self.hyperparams.log_samples,
@@ -134,29 +177,12 @@ class AbstractSegmentationExperiment(ABC):
 
         log_image_histograms(self.inputs)
 
-        forward_adapter = functools.partial(self.forward)
-        loss_fn_adapter = functools.partial(self.loss_fn)
-        projection_adapter = functools.partial(self.projection)
-        loss_logger_adapter = functools.partial(self.loss_logger)
-        logger_adapter = functools.partial(self.logger)
-        summary_adapter = functools.partial(self.summary)
-
-        # TODO: any processing with losses output?
-        state, _ = segmentation_optimize(
+        # Run the optimization (self is now an Optimizer)
+        state, _ = self.optimize(
             target=images,
             txm0=txm0,
             w0=w0,
             segmentation=segmentations,
-            loss_fn=loss_fn_adapter,
-            optimizer=self.optax,
-            forward_fn=forward_adapter,
-            loss_logger=loss_logger_adapter,
-            summary=summary_adapter,
-            logger=logger_adapter,
-            project_fn=projection_adapter,
-            constant_weights=self.hyperparams.constant_weights,
-            n_steps=self.hyperparams.n_steps,
-            eps=self.hyperparams.eps,
         )
 
         if state is None:
