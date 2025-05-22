@@ -1,13 +1,11 @@
-from jaxtyping import Array, Float
-import wandb
 import jax.numpy as jnp
 import numpy as np
-
-from chest_xray_sim.data.segmentation import MaskGroupsT
-from chest_xray_sim.inverse.core import SegmentationT
-from chest_xray_sim.types import TransmissionMapT
-from experiments.models import ExperimentInputs
+from jaxtyping import Array, Float
+from models import ExperimentInputs
 from utils import pull_image, sample_random
+
+import wandb
+from chest_xray_sim.data.segmentation import MaskGroupsT
 
 
 def summary(body):
@@ -16,6 +14,7 @@ def summary(body):
             wandb.summary[k] = v
     except wandb.Error:
         pass
+
 
 def log(body):
     try:
@@ -26,13 +25,15 @@ def log(body):
         raise e
 
 
-
 def empty_logger(body):
     pass
 
-def log_priors_table(seg_labels: list[MaskGroupsT],
+
+def log_priors_table(
+    seg_labels: list[MaskGroupsT],
     value_ranges: Float[Array, "labels 2"],
-    run = wandb)
+    run=wandb,
+):
     priors_table = wandb.Table(columns=["region", "min", "max"])
     for region, value_range in zip(seg_labels, value_ranges):
         min_val, max_val = value_range
@@ -41,8 +42,11 @@ def log_priors_table(seg_labels: list[MaskGroupsT],
     run.log({"priors": priors_table})
 
 
-def log_image_histograms(images: TransmissionMapT,
-    segmentations: SegmentationT, seg_labels: list[MaskGroupsT], samples: int | None=None):
+def log_image_histograms(inputs: ExperimentInputs, samples: int | None = None):
+    images = inputs.images
+    segmentations = inputs.segmentations
+    seg_labels = inputs.prior_labels
+
     if samples is None:
         samples = images.shape[0]
 
@@ -51,7 +55,7 @@ def log_image_histograms(images: TransmissionMapT,
         curr_image = images[idx]
         curr_masks = segmentations[idx]
 
-        image_histogram = wandb.Histogram(jnp.histogram(curr_image.flatten()))
+        image_histogram = wandb.Histogram(curr_image.flatten())
         log({"image histogram": image_histogram})
         for i, label in mask_labels.items():
             mask_idx = i - 1
@@ -59,15 +63,13 @@ def log_image_histograms(images: TransmissionMapT,
             log(
                 {
                     f"image ({label}) histogram": wandb.Histogram(
-                        jnp.histogram(
-                            curr_image[mask.astype(jnp.bool)].flatten()
-                        )
+                        curr_image[mask.astype(jnp.bool)].flatten()
                     )
                 }
             )
 
 
-def log_txm_histograms(inputs: ExperimentInputs, txm,pred,log_samples: int):
+def log_txm_histograms(inputs: ExperimentInputs, txm, pred, log_samples: int):
     images = inputs.images
     segmentations = inputs.segmentations
     seg_labels = inputs.prior_labels
@@ -123,4 +125,4 @@ def log_txm_histograms(inputs: ExperimentInputs, txm,pred,log_samples: int):
     samples_tables.add_column("Recovered", recovered_data)
     samples_tables.add_column("Forward", fwd_data)
 
-    wandb.log({"samples": samples_tables})
+    log({"samples": samples_tables})

@@ -25,7 +25,7 @@ def windowing(
     return x
 
 
-# @jax.jit
+@jax.jit
 def window(
     image: Image, window_center: Scalar, window_width: Scalar, gamma: Scalar
 ):
@@ -54,6 +54,7 @@ def unsharp_masking_alt(image: Image, sigma: float, enhance_factor: float):
     return x.squeeze()
 
 
+# @jax.jit
 def unsharp_masking(image: Image, sigma: float, enhance_factor: float):
     x = jnp.expand_dims(image, axis=-3)
     kernel_size = 2 * sigma
