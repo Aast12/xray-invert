@@ -1,13 +1,15 @@
 import argparse
 import functools
 import os
-from typing import Any, Literal
+from typing import Any, Literal, Tuple
 
 import cv2
 import jax
 import jax.numpy as jnp
 import joblib
 import numpy as np
+import optax
+import projections
 from cv2.typing import MatLike
 from eval import batch_evaluation
 from jaxtyping import Array, Float, Scalar
@@ -28,6 +30,124 @@ from chest_xray_sim.types import (
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
 
 
+def projection_with_spec(spec):
+    def projection_wrapper(
+        txm_state: TransmissionMapT,
+        weights_state: WeightsT,
+    ) -> Tuple[TransmissionMapT, WeightsT]:
+        """
+        Project transmission map values based on segmentation information.
+        Uses softer constraints with confidence-weighted projections.
+
+        Args:
+            txm_state: Transmission map state
+            weights_state: Weights state - parameters of the forward model
+            segmentation: Optional segmentation data
+        """
+
+        # General constraints
+        new_txm_state = optax.projections.projection_hypercube(txm_state)
+        new_weights_state = optax.projections.projection_non_negative(
+            weights_state
+        )
+
+        # Apply constraints on image processing parameters
+        new_weights_state = projections.projection_spec(new_weights_state, spec)
+
+        return new_txm_state, new_weights_state
+
+    return projection_wrapper
+
+
+def identity_projection(
+    txm_state: TransmissionMapT, weights_state: WeightsT, segmentation=None
+) -> Tuple[TransmissionMapT, WeightsT]:
+    """
+    Identity projection function that simply returns the input states.
+    Can be used as a base for the projection_with_spec decorator.
+
+    Args:
+        txm_state: Transmission map state
+        weights_state: Weights state - parameters of the forward model
+        segmentation: Optional segmentation data
+
+    Returns:
+        Unchanged transmission map and weights states
+    """
+    return txm_state, weights_state
+
+
+def batch_forward(single_forward):
+    """Decorator that converts a single-image forward function to handle batches.
+
+    Args:
+        single_forward: A function that processes a single image with weights
+
+    Returns:
+        A function that processes batches of images with batched weights
+    """
+
+    @functools.wraps(single_forward)
+    def forward_wrapper(image, weights):
+        """Forward processing for a batch of images with individual weights.
+
+        Args:
+            image: Batch of transmission maps
+            weights: Individual weights for each image
+
+        Returns:
+            Batch of processed images
+        """
+        results = []
+        for i in range(len(image)):
+            img_i = image[i]
+            weights_i = jax.tree.map(lambda x: x[i], weights)
+            results.append(single_forward(img_i, weights_i))
+
+        return jnp.stack(results)
+
+    return forward_wrapper
+
+
+def chexpert_filenames(meta_batch):
+    return [
+        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
+        for m in meta_batch
+    ]
+
+
+def save_results(
+    save_dir: str,
+    txm: TransmissionMapT,
+    weights: WeightsT,
+    pred: TransmissionMapT,
+    file_names: list[str],
+):
+    joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
+
+    # Save transmission maps and their processed versions
+    for i, (img, name) in enumerate(zip(txm, file_names)):
+        save_path = os.path.join(save_dir, f"{name}")
+        save_image(img, save_path)
+
+        # Also save the processed version
+        processed = pred[i]
+        proc_path = save_path.replace(".png", "_proc.png")
+        save_image(processed, proc_path)
+
+
+def sample_random(size: int, log_samples: int | None = None):
+    if log_samples is None:
+        log_samples = size
+
+    log_samples = min(log_samples, size)
+
+    rand_samples = np.random.randint(0, size, size=log_samples).tolist()
+    rand_samples = sorted(rand_samples)
+
+    return rand_samples
+
+
 def wandb_vec_metric(id: str, data: Array):
     return {
         f"{id}": wandb.Histogram(data),
@@ -46,33 +166,6 @@ def save_image(img, path: str, bits=8):
     )
 
 
-def save_results(
-    save_dir: str,
-    txm: TransmissionMapT,
-    weights: WeightsT,
-    pred: TransmissionMapT,
-    meta_batch: list[ChexpertMeta],
-):
-    joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
-    joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
-
-    # Create file names from metadata
-    file_names = [
-        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
-        for m in meta_batch
-    ]
-
-    # Save transmission maps and their processed versions
-    for i, (img, name) in enumerate(zip(txm, file_names)):
-        save_path = os.path.join(save_dir, f"{name}")
-        save_image(img, save_path)
-
-        # Also save the processed version
-        processed = pred[i]
-        proc_path = save_path.replace(".png", "_proc.png")
-        save_image(processed, proc_path)
-
-
 def process_results(
     images: ForwardT,
     segmentations: SegmentationT,
@@ -89,13 +182,11 @@ def process_results(
 
         # run_save_path = os.path.join(save_dir, run.id)
         # os.makedirs(run_save_path, exist_ok=True)
+        joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
+        joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
 
         save_results(
-            save_dir,
-            txm,
-            weights,
-            pred,
-            meta_batch,
+            save_dir, txm, weights, pred, chexpert_filenames(meta_batch)
         )
 
     try:

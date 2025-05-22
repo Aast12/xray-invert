@@ -1,0 +1,54 @@
+name: exhaustive
+method: bayes
+metric:
+  name: psnr_min
+  goal: maximize
+parameters:
+  lr:
+    min: 0.005
+    max: 0.1
+  max_sigma:
+    min: 2.0
+    max: 4.0
+  max_enhancement:
+    min: 0.5
+    max: 0.8
+  n_steps:
+    values:
+      - 300
+      - 600
+      - 1200
+  total_variation:
+    min: 0.0
+    max: 0.0005
+  prior_weight:
+    min: 0.1
+    max: 0.5
+  gmse_weight:
+    value: 0.0
+    # min: 0.1
+    # max: 0.5
+  PRNGKey:
+    value: 0
+  tm_init_params:
+    values:
+      # - - uniform
+      #   - - 0.01
+      #     - 0.99
+      # - - uniform
+      #   - - 0.2
+      #     - 0.8
+      # - - normal
+      #   - - 0.01
+      #     - 0.99
+      # - - normal
+      #   - - 0.2
+      #     - 0.8
+      - - negative
+        - null
+      - - target
+        - null
+  constant_weights:
+    value: false
+  eps:
+    value: 1.e-6

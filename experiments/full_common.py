@@ -321,6 +321,7 @@ def wandb_experiment(
     # HACK: this is a bit hacky, the most straightforward to broadcast the original single parameter dict
     # is to make each value an array in a broadcastable shape, txm has 3 dimensions [batch rows cols]
     summary({"initial_weights": w0})
+    
 
     # TODO: gaussian blur enforces a conversion to float32, requires parameters to match the type
     w0 = {k: jnp.array(v, dtype=jnp.float32) for k, v in w0.items()}
