@@ -3,22 +3,32 @@ import numpy as np
 from jaxtyping import Array, Float
 from models import ExperimentInputs
 from utils import pull_image, sample_random
+import torch
 
 import wandb
 from chest_xray_sim.data.segmentation import MaskGroupsT
 
+def is_array_like(obj):
+    return isinstance(obj, (np.ndarray, jnp.ndarray, torch.Tensor)) and obj.ndim > 0 
 
 def summary(body):
     try:
         for k, v in body.items():
-            wandb.summary[k] = v
+            if is_array_like(v):
+                wandb.log({k: wandb.Histogram(v)})
+            else:
+                wandb.summary[k] = v
     except wandb.Error:
         pass
 
 
 def log(body):
     try:
-        wandb.log(body)
+        mapped = {
+            k: v if not is_array_like(v) else wandb.Histogram(v)
+            for k, v in body.items()
+        }
+        wandb.log(mapped)
     except wandb.Error:
         pass
     except Exception as e:

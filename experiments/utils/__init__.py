@@ -9,9 +9,9 @@ import jax.numpy as jnp
 import joblib
 import numpy as np
 import optax
-import projections
+import chest_xray_sim.utils.projections as projections
 from cv2.typing import MatLike
-from eval import batch_evaluation
+from chest_xray_sim.inverse.eval import batch_evaluation
 from jaxtyping import Array, Float, Scalar
 from skimage.transform import resize
 

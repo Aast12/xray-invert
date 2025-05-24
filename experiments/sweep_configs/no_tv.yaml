@@ -4,18 +4,21 @@ metric:
   name: psnr_min
   goal: maximize
 parameters:
-  batch_size:
+  sub_batch_size:
     values:
+      - 4
+      - 8
       - 16
       - 32
       - 64
-      # - 128
-      # - 512
+  batch_size:
+    value: 64
   lr:
-    min: 0.005
-    max: 0.1
+    # value: 0.008464114533274628 
+    min: 0.001
+    max: 0.05
   max_sigma:
-    value: 3.0
+    value: 2.6
     # min: 2.0
     # max: 4.0
   max_enhancement:
@@ -28,17 +31,21 @@ parameters:
       # - 600
       # - 1200
   total_variation:
-    value: 1.e-5
+    value: 0.00001
     # min: 0.0
     # max: 0.0005
   prior_weight:
-    value: 0.4
-    # min: 0.1
-    # max: 0.5
+    # value: 0.25
+    min: 0.2
+    max: 0.8
+    # min: 0.2
+    # max: 0.3
   gmse_weight:
-    value: 0.0
-    # min: 0.1
-    # max: 0.5
+    # values: 
+    #   - 0.0
+    #   - 0.3839849151335945
+    min: 0.0
+    max: 1.0
   PRNGKey:
     value: 0
   tm_init_params:
@@ -48,4 +55,4 @@ parameters:
   constant_weights:
     value: false
   eps:
-    value: 1.e-6
+    value: 1.e-8
