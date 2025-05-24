@@ -2,28 +2,25 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 from jaxtyping import Array, Float
-from loss import compute_single_mask_penalty
 
-from chest_xray_sim.inverse import metrics
-from chest_xray_sim.types import (
+from ..types import (
     ForwardT,
     SegmentationT,
     TransmissionMapT,
     ValueRangeT,
 )
 
-DEBUG = True
+from .metrics import batch_segmentation_sq_penalty, compute_single_mask_penalty, ssim, psnr
 
 
-def ssim(pred: ForwardT, target: ForwardT):
-    """Structural Similarity Index Measure (SSIM)"""
-    return metrics.ssim(pred, target)
-
-
-def psnr(pred: ForwardT, target: ForwardT):
-    """Peak Signal-to-Noise Ratio (PSNR)"""
-    return metrics.psnr(pred, target)
-
+@dataclass
+class EvalMetrics:
+    ssim: Array
+    psnr: Array
+    penalties: Float[Array, " reduced_labels"]
+    bound_compliance: Float[Array, "reduced_labels batch"]
+    min_violations: Float[Array, "reduced_labels batch"]
+    max_violations: Float[Array, "reduced_labels batch"]
 
 def bound_compliance(
     pred: ForwardT, segmentations: SegmentationT, value_ranges: ValueRangeT
@@ -45,7 +42,6 @@ def bound_compliance(
         compliance = compliance.at[i].set(compliance_count / mask_size)
 
     return compliance
-
 
 def bound_violations(
     pred: ForwardT, segmentations: SegmentationT, value_ranges: ValueRangeT
@@ -78,20 +74,8 @@ def bound_violations(
             min_violation.max(axis=(-2, -1))
         )
 
-    print("max violations shape:", max_violations.shape)
-    print("min violations shape:", min_violations.shape)
 
     return max_violations, min_violations
-
-
-@dataclass
-class EvalMetrics:
-    ssim: Array
-    psnr: Array
-    penalties: Float[Array, " reduced_labels"]
-    bound_compliance: Float[Array, "reduced_labels batch"]
-    min_violations: Float[Array, "reduced_labels batch"]
-    max_violations: Float[Array, "reduced_labels batch"]
 
 
 def batch_evaluation(
@@ -107,12 +91,18 @@ def batch_evaluation(
 
     psnr_val = psnr(pred, images)
     ssim_val = ssim(pred, images)
-    penalties = jnp.ones(value_ranges.shape[0])
+    penalties = batch_segmentation_sq_penalty(
+        txm, segmentation, value_ranges
+    )
+    # penalties = jnp.ones((value_ranges.shape[0], images.shape[0]))
 
-    for mask_id, val_range in enumerate(value_ranges):
-        penalties = compute_single_mask_penalty(
-            mask_id, segmentation[:, mask_id], val_range, txm, penalties
-        )
+    # for mask_id, val_range in enumerate(value_ranges):
+    #     penalty = compute_single_mask_penalty(
+    #         mask_id, segmentation[:, mask_id], val_range, txm
+    #     )
+    #     penalties = penalties.at[mask_id].set(penalty)
+
+    penalties = penalties.mean(axis=-1)
 
     compliance = bound_compliance(pred, segmentation, value_ranges)
     max_violations, min_violations = bound_violations(

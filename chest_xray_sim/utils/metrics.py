@@ -1,4 +1,9 @@
+'''
+Deprecated
+'''
+
 import jax.numpy as jnp
+
 
 
 def naive_inversion(image):

@@ -21,7 +21,15 @@ class Optimizer(ABC):
     This class provides optimization functionality for recovering
     transmission maps and model parameters from images, with optional
     segmentation information.
+    
+    Available extensions:
+    - AdaptiveOptimizer: Per-image gradient stopping for all parameters
+    - SelectiveFreezeOptimizer: Freezes only transmission maps while preserving weights
     """
+
+    segmentation: Optional[SegmentationT] = None
+    step = 0 
+    losses: list[float] = []
 
     def __init__(
         self,
@@ -110,6 +118,12 @@ class Optimizer(ABC):
         for k, v in metrics.items():
             print(f"Summary - {k}: {v}")
 
+    def loss_call(self, weights, txm, target):
+        pred = self.forward(txm, weights)
+        loss = self.loss_fn(txm, weights, pred, target, self.segmentation)
+
+        return loss
+
     def optimize(
         self,
         target: BatchT,
@@ -129,36 +143,29 @@ class Optimizer(ABC):
             Tuple of (state, losses) where state is (transmission_map, weights)
         """
 
-        # Define loss call function
+        self.segmentation = segmentation
+
         def loss_call(weights, tx_maps, target):
-            pred = self.forward(tx_maps, weights)
-            loss = self.loss_fn(tx_maps, weights, pred, target, segmentation)
-
-            assert pred.shape == target.shape, (
-                f"Shapes do not match: {pred.shape} != {target.shape}"
-            )
-
-            return loss
+            return self.loss_call(weights, tx_maps, target) 
 
         # Initialize state
         state = (txm0, w0)
         opt_state = self.optimizer.init(state)
 
-        losses = []
+        self.losses = []
         prev_state = (None, None)
 
         # Time tracking variables
-        avg_it_time = 0.0
-        max_it_time = 0.0
-        min_it_time = float("inf")
+        it_times = []
         long_step = time.time()
 
         # Main optimization loop
         for step in range(self.n_steps):
+            self.step = step
             st = time.time()
 
             # Check for convergence
-            if step > 2 and jnp.abs(losses[-1] - losses[-2]) < self.eps:
+            if step > 2 and jnp.abs(self.losses[-1] - self.losses[-2]) < self.eps:
                 self.summary({"convergence_steps": step})
                 print(f"Converged after {step} steps")
                 break
@@ -204,7 +211,7 @@ class Optimizer(ABC):
                 state = new_state
                 opt_state = new_opt_state
 
-            losses.append(loss)
+            self.losses.append(loss)
 
             if jnp.isnan(loss):
                 state, loss = prev_state
@@ -232,24 +239,20 @@ class Optimizer(ABC):
             # Time tracking
             if self.track_time:
                 it_time = time.time() - st
-                avg_it_time = (avg_it_time * step + it_time) / (step + 1)
-                max_it_time = max(max_it_time, it_time)
-                min_it_time = min(min_it_time, it_time)
+                it_times.append(it_time)
 
         # Log time metrics
         if self.track_time:
             self.summary(
                 {
-                    "avg_it_time": avg_it_time,
-                    "max_it_time": max_it_time,
-                    "min_it_time": min_it_time,
+                    "it_time": it_times
                 }
             )
 
         if state is None:
-            return None, losses
+            return None, self.losses
 
-        return state, losses
+        return state, self.losses
 
 
 # Legacy function wrappers for backward compatibility
