@@ -1,7 +1,10 @@
+from dataclasses import dataclass
 from typing import Callable, Union
 
 from jaxtyping import Array, Float, PyTree
 from torch import Tensor
+
+from chest_xray_sim.data.segmentation import MaskGroupsT
 
 ArrayT = Union[Array, Tensor]
 
@@ -29,3 +32,12 @@ ProjectFnT = Callable[[PyTree, WeightsT], tuple[PyTree, WeightsT]]
 SegProjectFnT = Callable[
     [PyTree, WeightsT, SegmentationT], tuple[PyTree, WeightsT]
 ]
+
+
+@dataclass
+class ExperimentInputs:
+    """Container for experiment input data."""
+    images: TransmissionMapT
+    segmentations: SegmentationT
+    prior_labels: list[MaskGroupsT]
+    priors: ValueRangeT
