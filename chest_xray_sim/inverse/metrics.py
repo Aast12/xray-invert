@@ -80,6 +80,7 @@ def unsharp_mask_similarity(
     pred: Float[Array, "batch height width"],
     target: Float[Array, "batch height width"],
     sigma=3.0,
+    reduction: typing.Literal["mean", "sum", "max"] = "mean",
 ):
     x_detail = (
         pred
@@ -100,9 +101,16 @@ def unsharp_mask_similarity(
         ).squeeze()
     )
 
-    detail_mse = jnp.mean((x_detail - y_detail) ** 2)
+    detail_diff = (x_detail - y_detail) ** 2
 
-    return detail_mse
+    if reduction == "max":
+        return detail_diff.max()
+    elif reduction == "mean":
+        return detail_diff.mean()
+    elif reduction == "sum":
+        return detail_diff.sum()
+    else:
+        return detail_diff
 
 @jax.jit
 def compute_single_mask_penalty(

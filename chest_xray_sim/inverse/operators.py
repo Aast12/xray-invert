@@ -25,14 +25,16 @@ def windowing(
     return x
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(4, ))
 def window(
-    image: Image, window_center: Scalar, window_width: Scalar, gamma: Scalar
+    image: Image, window_center: Scalar, window_width: Scalar, gamma: Scalar, windowing_type: str = "sigmoid"
 ):
     x = image
     x = (x - window_center) / window_width
-    return jax.nn.sigmoid(x * gamma)
-
+    if windowing_type == "linear":
+        return jnp.clip(x + window_center, 0.0, 1.0)
+    elif windowing_type == "sigmoid":
+        return jax.nn.sigmoid(x * gamma)
 
 @jax.jit
 def low_pass(image: Image, sigma: float):

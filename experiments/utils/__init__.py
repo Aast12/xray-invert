@@ -201,6 +201,10 @@ def process_results(
                 **wandb_vec_metric("psnr", metrics.psnr),
                 **wandb_vec_metric("ssim", metrics.ssim),
                 **wandb_vec_metric("penalties", metrics.penalties),
+                **wandb_vec_metric("mse", metrics.mse),
+                **wandb_vec_metric("band_similarity", metrics.band_similarity),
+                **wandb_vec_metric("tikhonov", metrics.tikonov),
+                **wandb_vec_metric("total_variation", metrics.total_variation),
             }
         )
     except Exception as e:

@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, TypedDict
+import typing
 
 import jax
 import jax.numpy as jnp
@@ -60,6 +61,9 @@ class ExperimentArgs(ExperimentProtocol):
     eps: float
     max_sigma: float
     max_enhancement: float
+    smooth_metric: typing.Literal["tikonov", "tv"]
+    use_band_similarity: bool
+    windowing_type: typing.Literal["sigmoid", "linear"]
 
 
 class ForwardParams(TypedDict):
@@ -99,26 +103,26 @@ class SegmentationExperiment(SegmentationOptimizer):
         self.common_weights = common_weights
         self.w0 = w0
 
-        self.projection_fn = projection_with_spec(
-            {
-                # "low_sigma": proj.box(0.5, self.hyperparams.max_sigma),
-                "enhance_factor": proj.box(0.05, self.hyperparams.max_enhancement),
-                "gamma": proj.box(1, 20),
-                "window_center": proj.box(0.1, 0.8),
-                "window_width": proj.box(0.1, 1.0),
-            }
-        )
+        projection_spec = {
+            # "low_sigma": proj.box(0.5, self.hyperparams.max_sigma),
+            "enhance_factor": proj.box(0.05, self.hyperparams.max_enhancement),
+            "window_center": proj.box(0.1, 0.8),
+            "window_width": proj.box(0.1, 1.0),
+        }
+
+        if hyperparams.windowing_type == "sigmoid":
+            projection_spec["gamma"] = proj.box(1, 20)
+
+        self.projection_fn = projection_with_spec(projection_spec)
 
         weights_ax = jax.tree.map(lambda _: None if self.common_weights else 0, self.w0)
 
-        self.forward_fn = jax.jit(
-            jax.vmap(
-                self._forward,
-                in_axes=(
-                    0,
-                    weights_ax,
-                ),
-            )
+        self.forward_fn = jax.vmap(
+            self._forward,
+            in_axes=(
+                0,
+                weights_ax,
+            ),
         )
 
     def _forward(self, txm, weights):
@@ -128,7 +132,8 @@ class SegmentationExperiment(SegmentationOptimizer):
             x,
             weights["window_center"],
             weights["window_width"],
-            weights["gamma"],
+            weights.get("gamma", 0.0),
+            self.hyperparams.windowing_type,
         )
         x = ops.range_normalize(x)
         x = ops.unsharp_masking(x, 2.0, weights["enhance_factor"])
@@ -155,61 +160,16 @@ class SegmentationExperiment(SegmentationOptimizer):
     def project(self, txm, weights, segmentation=None):
         return self.projection_fn(txm, weights)
 
-    def loss_fn_unaggregated(
-        self,
-        txm: TransmissionMapT,
-        weights: WeightsT,
-        pred: Float[Array, "batch height width"],
-        target: Float[Array, "batch height width"],
-        segmentation: Float[Array, "batch reduced_labels height width"],
-    ) -> Float[Array, " batch"]:
-        """
-        Compute per-image losses without aggregation.
+    def loss_call(self, weights, txm, target):
+        pred = self.forward(txm, weights)
+        loss = self.loss_fn(txm, weights, pred, target, self.segmentation)
 
-        Returns a vector of losses, one per image in the batch.
-        """
-        value_ranges = self.inputs.priors
-        tv_factor = self.hyperparams.total_variation
-        gmse_weight = self.hyperparams.gmse_weight
-        prior_weight = self.hyperparams.prior_weight
-
-        # Per-image MSE
-        mse_per_image = jnp.mean((pred - target) ** 2, axis=(-2, -1))
-
-        # gradient_loss = (
-        #     (jnp.diff(pred, axis=-2) - jnp.diff(target, axis=-2)) ** 2
-        # ).sum(axis=(-2, -1)) + (
-        #     (jnp.diff(pred, axis=-1) - jnp.diff(target, axis=-1)) ** 2
-        # ).sum(
-        #     axis=(-2, -1)
-        # )
-
-        # Per-image total variation
-        # Use the metrics module directly to get per-image TV
-        tv_per_image = metrics.total_variation(txm, reduction=None)
-
-        seg_penalty_per_image = metrics.batch_segmentation_sq_penalty(
-            txm, segmentation, value_ranges
+        self.log(
+            {
+                "loss": loss.item(),
+            }
         )
-
-
-        # Per-image unsharp mask similarity
-        def per_image_gms(p, t):
-            return metrics.unsharp_mask_similarity(
-                p[None, ...], t[None, ...], 3.0
-            ) + metrics.unsharp_mask_similarity(p[None, ...], t[None, ...], 10.0)
-
-        gms_per_image = jax.vmap(per_image_gms)(pred, target)
-
-        per_image_losses = (
-            mse_per_image
-            # + gradient_loss
-            + tv_factor * tv_per_image
-            + prior_weight * seg_penalty_per_image
-            + gmse_weight * gms_per_image
-        )
-
-        return per_image_losses
+        return loss
 
     def loss_fn(
         self,
@@ -219,10 +179,42 @@ class SegmentationExperiment(SegmentationOptimizer):
         target: Float[Array, "batch height width"],
         segmentation: Float[Array, "batch reduced_labels height width"],
     ):
-        per_image_losses = self.loss_fn_unaggregated(
-            txm, weights, pred, target, segmentation
+        value_ranges = self.inputs.priors
+        tv_factor = self.hyperparams.total_variation
+        gmse_weight = self.hyperparams.gmse_weight
+        prior_weight = self.hyperparams.prior_weight
+
+        band_similarity = 1.0 if self.hyperparams.use_band_similarity else 0.0
+
+        # l2 loss
+        mse_per_image = 0.5 * jnp.mean((pred - target) ** 2)
+
+        # Per-image total variation
+        # Use the metrics module directly to get per-image TV
+        tv_per_image = (
+            metrics.tikhonov(txm, reduction="mean")
+            if self.hyperparams.smooth_metric == "tikonov"
+            else metrics.total_variation(txm, reduction="mean")
         )
-        return jnp.mean(per_image_losses)
+
+        seg_penalty_per_image = (
+            metrics.batch_segmentation_sq_penalty(txm, segmentation, value_ranges)
+            .sum(axis=-1)
+            .mean()
+        )
+
+        gms = metrics.unsharp_mask_similarity(
+            pred, target, sigma=3.0
+        ) + metrics.unsharp_mask_similarity(pred, target, sigma=10.0)
+
+        per_image_losses = (
+            mse_per_image
+            + tv_factor * tv_per_image
+            + prior_weight * seg_penalty_per_image
+            + gmse_weight * gms * band_similarity
+        )
+
+        return per_image_losses
 
 
 def run_processing(
@@ -256,16 +248,20 @@ def run_processing(
 
     hyperparams.segmentation_th = segmentation_th
 
+    w0 = {
+        "enhance_factor": 0.5,
+        "window_center": 0.2,
+        "window_width": 0.2,
+    }
+
+    if hyperparams.windowing_type == "sigmoid":
+        w0["gamma"] = 5.0
+
     exp = SegmentationExperiment(
         inputs,
         hyperparams,
         common_weights=True,
-        w0={
-            "enhance_factor": 0.5,
-            "window_center": 0.2,
-            "window_width": 0.2,
-            "gamma": 5,
-        },
+        w0=w0,
     )
     results = exp.run()
 

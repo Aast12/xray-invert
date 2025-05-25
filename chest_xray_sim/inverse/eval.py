@@ -10,17 +10,29 @@ from ..types import (
     ValueRangeT,
 )
 
-from .metrics import batch_segmentation_sq_penalty, compute_single_mask_penalty, ssim, psnr
+from .metrics import (
+    batch_segmentation_sq_penalty,
+    ssim,
+    psnr,
+    tikhonov,
+    total_variation,
+    unsharp_mask_similarity,
+)
 
 
 @dataclass
 class EvalMetrics:
     ssim: Array
     psnr: Array
+    mse: Float[Array, " batch"]
+    total_variation: Float[Array, " batch"]
+    tikonov: Float[Array, " batch"]
+    band_similarity: Float[Array, " batch"]
     penalties: Float[Array, " reduced_labels"]
     bound_compliance: Float[Array, "reduced_labels batch"]
     min_violations: Float[Array, "reduced_labels batch"]
     max_violations: Float[Array, "reduced_labels batch"]
+
 
 def bound_compliance(
     pred: ForwardT, segmentations: SegmentationT, value_ranges: ValueRangeT
@@ -43,11 +55,10 @@ def bound_compliance(
 
     return compliance
 
+
 def bound_violations(
     pred: ForwardT, segmentations: SegmentationT, value_ranges: ValueRangeT
-) -> tuple[
-    Float[Array, "reduced_labels batch"], Float[Array, "reduced_labels batch"]
-]:
+) -> tuple[Float[Array, "reduced_labels batch"], Float[Array, "reduced_labels batch"]]:
     """Max and min violations, only when the pixel is outside the bounds of the value ranges"""
     # For max violations: Only count values that exceed the upper bound
     max_violations = jnp.ones((value_ranges.shape[0], pred.shape[0]))
@@ -60,20 +71,11 @@ def bound_violations(
         region_values = pred * mask
 
         # TODO: masks dont preserve shape
-        max_violation = jnp.where(
-            mask > 0, jnp.maximum(0.0, region_values - maxv), 0.0
-        )
-        min_violation = jnp.where(
-            mask > 0, jnp.maximum(0.0, minv - region_values), 0.0
-        )
+        max_violation = jnp.where(mask > 0, jnp.maximum(0.0, region_values - maxv), 0.0)
+        min_violation = jnp.where(mask > 0, jnp.maximum(0.0, minv - region_values), 0.0)
 
-        max_violations = max_violations.at[i].set(
-            max_violation.max(axis=(-2, -1))
-        )
-        min_violations = min_violations.at[i].set(
-            min_violation.max(axis=(-2, -1))
-        )
-
+        max_violations = max_violations.at[i].set(max_violation.max(axis=(-2, -1)))
+        min_violations = min_violations.at[i].set(min_violation.max(axis=(-2, -1)))
 
     return max_violations, min_violations
 
@@ -91,23 +93,15 @@ def batch_evaluation(
 
     psnr_val = psnr(pred, images)
     ssim_val = ssim(pred, images)
-    penalties = batch_segmentation_sq_penalty(
-        txm, segmentation, value_ranges
-    )
-    # penalties = jnp.ones((value_ranges.shape[0], images.shape[0]))
-
-    # for mask_id, val_range in enumerate(value_ranges):
-    #     penalty = compute_single_mask_penalty(
-    #         mask_id, segmentation[:, mask_id], val_range, txm
-    #     )
-    #     penalties = penalties.at[mask_id].set(penalty)
-
-    penalties = penalties.mean(axis=-1)
+    mse_val = jnp.mean((pred - images) ** 2, axis=(-2, -1))
+    penalties = batch_segmentation_sq_penalty(txm, segmentation, value_ranges)
+    penalties = penalties.sum(axis=0)
 
     compliance = bound_compliance(pred, segmentation, value_ranges)
-    max_violations, min_violations = bound_violations(
-        pred, segmentation, value_ranges
-    )
+    max_violations, min_violations = bound_violations(pred, segmentation, value_ranges)
+
+    low_similarity = unsharp_mask_similarity(pred, images, sigma=3.0)
+    high_similarity = unsharp_mask_similarity(pred, images, sigma=10.0)
 
     return EvalMetrics(
         ssim=ssim_val,
@@ -116,4 +110,8 @@ def batch_evaluation(
         bound_compliance=compliance,
         min_violations=min_violations,
         max_violations=max_violations,
+        mse=mse_val,
+        total_variation=total_variation(txm, "none"),
+        tikonov=tikhonov(txm, "none"),
+        band_similarity=low_similarity + high_similarity,
     )
