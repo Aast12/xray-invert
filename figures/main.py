@@ -419,10 +419,11 @@ if __name__ == "__main__":
     plot_processed_tm_histogram(map0, img_window_params)
     plot_windowing_fwd_image(map0, img_window_params)
 
-    fig, ax = plt.subplots(1, 2, figsize=(10, 6))
+    fig, ax = plt.subplots(1, 2, figsize=(13, 6))
 
     ax[0].imshow(matching_tm, cmap="gray", vmax=1, vmin=0)
     ax[1].hist(matching_tm.flatten(), bins=70, alpha=0.3, label="full")
+    ax[1].set_box_aspect(1)
     colors = ["red", "green", "blue"]
 
     for i, label in enumerate(tm_mask_labels):
@@ -440,7 +441,7 @@ if __name__ == "__main__":
         )
         ax[0].plot([], color=color, label=label, linewidth=2)
 
-        ax[1].hist(mask_values, bins=50, label=label, alpha=0.4, color=color)
+        ax[1].hist(mask_values, bins=30, label=label, alpha=0.4, color=color)
 
     ax[0].axis("off")
     ax[1].set_xlabel("Transmission")

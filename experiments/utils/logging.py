@@ -83,6 +83,7 @@ def log_txm_histograms(inputs: ExperimentInputs, txm, pred, log_samples: int):
     images = inputs.images
     segmentations = inputs.segmentations
     seg_labels = inputs.prior_labels
+    log_samples = min(log_samples, images.shape[0])
     rand_samples = sample_random(images.shape[0], log_samples)
 
     mask_labels = {i + 1: label for i, label in enumerate(seg_labels)}

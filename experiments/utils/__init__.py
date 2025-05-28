@@ -200,6 +200,7 @@ def process_results(
                 **wandb_vec_metric("compliance", metrics.bound_compliance),
                 **wandb_vec_metric("psnr", metrics.psnr),
                 **wandb_vec_metric("ssim", metrics.ssim),
+                **wandb_vec_metric("ms_ssim", metrics.ms_ssim),
                 **wandb_vec_metric("penalties", metrics.penalties),
                 **wandb_vec_metric("mse", metrics.mse),
                 **wandb_vec_metric("band_similarity", metrics.band_similarity),

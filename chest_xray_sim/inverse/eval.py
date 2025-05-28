@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
@@ -12,6 +13,7 @@ from ..types import (
 
 from .metrics import (
     batch_segmentation_sq_penalty,
+    ms_ssim,
     ssim,
     psnr,
     tikhonov,
@@ -23,6 +25,7 @@ from .metrics import (
 @dataclass
 class EvalMetrics:
     ssim: Array
+    ms_ssim: Array
     psnr: Array
     mse: Float[Array, " batch"]
     total_variation: Float[Array, " batch"]
@@ -93,6 +96,8 @@ def batch_evaluation(
 
     psnr_val = psnr(pred, images)
     ssim_val = ssim(pred, images)
+
+    ms_ssim_val = jax.vmap(ms_ssim, in_axes=(0, 0))(pred, images)
     mse_val = jnp.mean((pred - images) ** 2, axis=(-2, -1))
     penalties = batch_segmentation_sq_penalty(txm, segmentation, value_ranges)
     penalties = penalties.sum(axis=0)
@@ -114,4 +119,5 @@ def batch_evaluation(
         total_variation=total_variation(txm, "none"),
         tikonov=tikhonov(txm, "none"),
         band_similarity=low_similarity + high_similarity,
+        ms_ssim=ms_ssim_val,
     )

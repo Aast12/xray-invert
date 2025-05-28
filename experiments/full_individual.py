@@ -26,6 +26,7 @@ from utils.tracking import (
 )
 from utils.logging import (
     log,
+    log_txm_histograms,
     summary as log_summary,
 )
 
@@ -68,11 +69,14 @@ class ExperimentArgs(ExperimentProtocol):
     smooth_metric: typing.Literal["tikonov", "tv"]
     use_band_similarity: bool
     windowing_type: typing.Literal["sigmoid", "linear"]
+    data_fidelity: typing.Literal["l2", "ssim"]
     # Individual optimizer specific params
     txm_optimizer: str  # Optimizer type for transmission maps
     weights_optimizer: str  # Optimizer type for weights
-    txm_lr_factor: float  # Factor to multiply base lr for txm optimizer
-    weights_lr_factor: float  # Factor to multiply base lr for weights optimizer
+    txm_lr_factor: float  # factor to multiply base lr for txm optimizer
+    weights_lr_factor: float  # factor to multiply base lr for weights optimizer
+    txm_lr: float  # factor to multiply base lr for txm optimizer
+    weights_lr: float  # factor to multiply base lr for weights optimizer
     momentum: float  # Momentum for SGD
     weight_decay: float  # Weight decay for AdamW
 
@@ -99,11 +103,16 @@ class IndividualSegmentationExperiment(IndividualGradientOptimizer):
         **kwargs,
     ):
         # Determine optimizers based on sweep parameters
-        base_lr = hyperparams.lr
+        # base_lr = hyperparams.lr
         
         # Use different learning rates for txm and weights
-        txm_lr = base_lr * hyperparams.txm_lr_factor
-        weights_lr = base_lr * hyperparams.weights_lr_factor
+        txm_lr = hyperparams.txm_lr
+        weights_lr = hyperparams.weights_lr
+        
+        # self.summary({
+        #     'txm_lr': txm_lr,
+        #     'weights_lr': weights_lr,
+        # })
         
         # Create optimizers based on hyperparameter choices
         def create_optimizer(opt_type: str, lr: float) -> optax.GradientTransformation:
@@ -111,6 +120,8 @@ class IndividualSegmentationExperiment(IndividualGradientOptimizer):
                 return optax.adam(learning_rate=lr)
             elif opt_type == "sgd":
                 return optax.sgd(learning_rate=lr, momentum=hyperparams.momentum)
+            elif opt_type == "amsgrad":
+                return optax.amsgrad(learning_rate=lr)
             elif opt_type == "rmsprop":
                 return optax.rmsprop(learning_rate=lr)
             elif opt_type == "adamw":
@@ -196,15 +207,23 @@ class IndividualSegmentationExperiment(IndividualGradientOptimizer):
         prior_weight = self.hyperparams.prior_weight
         band_similarity = 1.0 if self.hyperparams.use_band_similarity else 0.0
         
-        # MSE loss
-        mse = 0.5 * jnp.mean((pred - target) ** 2)
+        # l2 loss 
+        mse = 0.0
+        if self.hyperparams.data_fidelity == "l2":
+            mse = 0.5 * jnp.mean((pred - target) ** 2)
+        elif self.hyperparams.data_fidelity == "ssim":
+            mse = 1.0 - metrics.ms_ssim(pred, target)
         
         # Total variation (for single image)
-        tv = (
-            metrics.tikhonov(txm[jnp.newaxis, ...], reduction="mean")
-            if self.hyperparams.smooth_metric == "tikonov"
-            else metrics.total_variation(txm[jnp.newaxis, ...], reduction="mean")
-        )
+
+        tv = 0.0
+
+        if self.hyperparams.smooth_metric == "tikonov":
+            tv = metrics.tikhonov(txm, reduction="mean")
+        elif self.hyperparams.smooth_metric == "tv2":
+            tv = metrics.total_generalized_variation(txm, reduction="mean")
+        elif self.hyperparams.smooth_metric == "tv":
+            tv = metrics.total_variation(txm[jnp.newaxis, ...], reduction="mean")
         
         # Segmentation penalty
         if segmentation is not None:
@@ -216,19 +235,12 @@ class IndividualSegmentationExperiment(IndividualGradientOptimizer):
         else:
             seg_penalty = 0.0
         
-        # Unsharp mask similarity
-        gms = metrics.unsharp_mask_similarity(
-            pred[jnp.newaxis, ...], target[jnp.newaxis, ...], sigma=3.0
-        ) + metrics.unsharp_mask_similarity(
-            pred[jnp.newaxis, ...], target[jnp.newaxis, ...], sigma=10.0
-        )
         
         # Total loss
         loss = (
             mse
             + tv_factor * tv
             + prior_weight * seg_penalty
-            + gmse_weight * gms * band_similarity
         )
         
         return loss
@@ -250,23 +262,17 @@ class IndividualSegmentationExperiment(IndividualGradientOptimizer):
         # Store segmentation
         self.segmentation = segmentation
 
-        print('shapes: ')
-        print('target:', target.shape, target.dtype)
-        print('txm0:', txm0.shape, txm0.dtype)
-        print('w0:', w0)
-        
         # Call parent optimize
         result = super().optimize(target, txm0, w0, segmentation)
-
-        print('optimize result:', result)
-        print('result[0]:', result[0][0].shape if result[0] is not None else None)
-        print('result[1]:', result[1][1] if result[1] is not None else None)
         
         if result[0] is not None:
             # Compute final metrics
             final_txm, final_weights = result[0]
+
             final_pred = self.forward(final_txm, final_weights)
             
+            log_txm_histograms(self.inputs, final_txm, final_pred, log_samples = 30)
+
             # Compute metrics
             # Ensure target has the same shape as final_pred
             if target.ndim == 4 and target.shape[1] == 1:
@@ -329,12 +335,6 @@ def run_processing(
     
     # Verify the shape is correct
     assert inputs.images.ndim == 3, f"Expected 3D images, got shape {inputs.images.shape}"
-    
-    print("inputs:")
-    print("images", inputs.images.shape, inputs.images.dtype)
-    print("segmentations", inputs.segmentations.shape, inputs.segmentations.dtype)
-    print("prior_labels", inputs.prior_labels)
-    print("priors", inputs.priors.shape, inputs.priors.dtype)
     
     hyperparams.segmentation_th = segmentation_th
     
