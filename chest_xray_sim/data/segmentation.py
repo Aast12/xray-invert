@@ -297,7 +297,7 @@ def batch_get_exclusive_masks(
         for group in ordered_groups
     ]
 
-    complete_masks = jnp.concat(complete_masks, axis=1)
+    complete_masks = jnp.concat(complete_masks, axis=1).astype(jnp.int8)
 
     exclusive_masks = complete_masks.copy()
     for i in range(complete_masks.shape[1]):

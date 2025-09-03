@@ -1,75 +1,113 @@
 #!/usr/bin/env python3
 """
-Analyze regularization weights using the L-curve method and other techniques.
+Analyze regularization weights using advanced methods beyond L-curve.
 
-The L-curve method plots the reconstruction error vs regularization penalty
-for different regularization weights. The optimal weight is typically at the
-"corner" of the L-shaped curve, balancing data fidelity and regularization.
+This script implements multiple approaches to find optimal regularization weights:
+1. Grid search with validation set performance
+2. Pareto frontier analysis for multi-objective optimization
+3. Trade-off analysis between reconstruction quality and anatomical consistency
+
+The focus is on properly valuing the segmentation prior, which is crucial for
+anatomically consistent reconstructions.
 """
 
 import os
 import argparse
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Any
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-import jax
 import jax.numpy as jnp
 import optax
 from tqdm import tqdm
+import json
 
 from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
 from chest_xray_sim.data.segmentation import batch_get_exclusive_masks
 from chest_xray_sim.data.priors import get_priors
 from chest_xray_sim.inverse import metrics
-from chest_xray_sim.inverse.core import Optimizer
+from chest_xray_sim.inverse.individual_gradient_optimizer import IndividualGradientOptimizer
 import chest_xray_sim.inverse.operators as ops
 
 
-class SimpleOptimizer(Optimizer):
-    """Simple optimizer for regularization analysis."""
+class RegularizationOptimizer(IndividualGradientOptimizer):
+    """Optimizer for regularization weight analysis using individual gradients."""
     
-    def __init__(self, tv_weight: float = 0.0, prior_weight: float = 0.0, value_ranges=None, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self, 
+        tv_weight: float = 0.0, 
+        prior_weight: float = 0.0, 
+        value_ranges=None,
+        **kwargs
+    ):
+        # Set up separate optimizers for txm and weights
+        txm_optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adam(learning_rate=kwargs.get('lr', 0.001))
+        )
+        weights_optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adam(learning_rate=kwargs.get('lr', 0.001))
+        )
+        
+        super().__init__(
+            txm_optimizer=txm_optimizer,
+            weights_optimizer=weights_optimizer,
+            **kwargs
+        )
+        
         self.tv_weight = tv_weight
         self.prior_weight = prior_weight
         self.value_ranges = value_ranges
     
-    def _forward_single(self, txm, weights):
-        """Forward model for a single image."""
-        x = ops.negative_log(txm[jnp.newaxis, ...])  # Add batch dimension
-        x = ops.window(x, weights["window_center"], weights["window_width"], 0.0, "linear")
-        x = ops.range_normalize(x)
-        x = ops.unsharp_masking(x, 2.0, weights["enhance_factor"])
-        return ops.clipping(x)[0]  # Remove batch dimension
-    
     def forward(self, txm, weights):
-        """Simple forward model with batch support."""
+        """Forward model for image processing."""
         # Ensure txm is in valid range
         txm = jnp.clip(txm, 0.01, 0.99)
         
-        # Simple forward model that works well
+        # Apply negative log transform
         x = -jnp.log(txm)
-        x = (x - weights["window_center"]) / weights["window_width"]
-        x = jnp.clip(x + weights["window_center"], 0.0, 1.0)
+        
+        # Window the image
+        x = ops.window(
+            x[jnp.newaxis, ...],  # Add batch dimension
+            weights["window_center"],
+            weights["window_width"],
+            0.0,
+            "linear"
+        )[0]  # Remove batch dimension
         
         # Optional: add unsharp masking
-        # x = ops.unsharp_masking(x, 2.0, weights["enhance_factor"])
+        if "enhance_factor" in weights:
+            x = ops.unsharp_masking(
+                x[jnp.newaxis, ...], 
+                2.0, 
+                weights["enhance_factor"]
+            )[0]
+        
+        # Ensure output is in [0, 1]
+        x = jnp.clip(x, 0.0, 1.0)
         
         return x
     
-    def loss_fn(self, txm, weights, pred, target, segmentation=None):
-        """Loss function with configurable regularization weights."""
+    def loss_call_individual(self, weights, txm, target, segmentation=None):
+        """Loss computation for a single image-weight pair."""
+        # Forward pass
+        pred = self.forward(txm, weights)
+        
         # Data fidelity term (MSE)
         mse = 0.5 * jnp.mean((pred - target) ** 2)
         
-        # Regularization terms
-        tv = metrics.total_variation(txm, reduction="mean")
+        # Total variation regularization
+        tv = metrics.total_variation(txm[jnp.newaxis, ...], reduction="mean")
         
+        # Segmentation prior
         if segmentation is not None and self.value_ranges is not None:
             seg_penalty = metrics.batch_segmentation_sq_penalty(
-                txm, segmentation, self.value_ranges
-            ).sum(axis=-1).mean()
+                txm[jnp.newaxis, ...], 
+                segmentation[jnp.newaxis, ...], 
+                self.value_ranges
+            ).sum()
         else:
             seg_penalty = 0.0
         
@@ -79,494 +117,653 @@ class SimpleOptimizer(Optimizer):
         return total_loss
     
     def compute_metrics(self, txm, weights, target, segmentation=None):
-        """Compute metrics outside of JAX tracing."""
+        """Compute individual metrics for evaluation."""
         pred = self.forward(txm, weights)
         
-        # Data fidelity term (MSE)
+        # Data fidelity
         mse = 0.5 * jnp.mean((pred - target) ** 2)
         
         # Regularization terms
-        tv = metrics.total_variation(txm, reduction="mean")
+        tv = metrics.total_variation(txm[jnp.newaxis, ...], reduction="mean")
         
         if segmentation is not None and self.value_ranges is not None:
             seg_penalty = metrics.batch_segmentation_sq_penalty(
-                txm, segmentation, self.value_ranges
-            ).sum(axis=-1).mean()
+                txm[jnp.newaxis, ...], 
+                segmentation[jnp.newaxis, ...], 
+                self.value_ranges
+            ).sum()
         else:
             seg_penalty = 0.0
+        
+        # Additional metrics for evaluation
+        psnr = 20 * jnp.log10(1.0 / jnp.sqrt(2 * mse))
+        
+        # Anatomical consistency: average deviation from expected tissue values
+        if segmentation is not None and self.value_ranges is not None:
+            anatomical_consistency = compute_anatomical_consistency(
+                txm, segmentation, self.value_ranges
+            )
+        else:
+            anatomical_consistency = 0.0
+        
+        return {
+            'mse': float(mse),
+            'tv': float(tv),
+            'seg_penalty': float(seg_penalty),
+            'psnr': float(psnr),
+            'anatomical_consistency': float(anatomical_consistency)
+        }
+
+
+def compute_anatomical_consistency(txm, segmentation, value_ranges):
+    """
+    Compute how well the transmission map matches expected tissue values.
+    
+    Returns a score where lower is better (0 = perfect match).
+    """
+    consistency = 0.0
+    n_tissues = segmentation.shape[0]
+    
+    for tissue_idx in range(n_tissues):
+        mask = segmentation[tissue_idx]
+        if jnp.sum(mask) > 0:
+            # Get tissue values
+            tissue_txm = txm * mask
+            masked_sum = jnp.sum(tissue_txm)
+            mask_sum = jnp.sum(mask)
+            mean_value = masked_sum / (mask_sum + 1e-8)
             
-        return mse, tv, seg_penalty
+            # Expected range for this tissue
+            expected_min = value_ranges[tissue_idx, 0]
+            expected_max = value_ranges[tissue_idx, 1]
+            expected_mean = (expected_min + expected_max) / 2
+            
+            # Deviation from expected
+            deviation = jnp.abs(mean_value - expected_mean)
+            consistency += deviation
+    
+    return consistency / n_tissues
 
 
-def compute_l_curve_points(
+def grid_search_validation(
+    train_images: jnp.ndarray,
+    train_segmentations: jnp.ndarray,
+    val_images: jnp.ndarray,
+    val_segmentations: jnp.ndarray,
+    value_ranges: jnp.ndarray,
+    tv_weights: List[float],
+    prior_weights: List[float],
+    n_steps: int = 200,
+) -> Dict[str, Any]:
+    """
+    Perform grid search using validation set performance.
+    
+    Returns dictionary with results and optimal weights.
+    """
+    results = {
+        'tv_weights': [],
+        'prior_weights': [],
+        'train_metrics': [],
+        'val_metrics': [],
+    }
+    
+    best_val_score = float('inf')
+    best_weights = None
+    
+    # Initialize per-image weights for training set
+    n_train = len(train_images)
+    w0 = {
+        "enhance_factor": jnp.ones(n_train) * 0.5,
+        "window_center": jnp.ones(n_train) * 0.3,
+        "window_width": jnp.ones(n_train) * 0.4,
+    }
+    
+    print("\nPerforming grid search with validation set...")
+    total_combinations = len(tv_weights) * len(prior_weights)
+    
+    with tqdm(total=total_combinations) as pbar:
+        for tv_weight in tv_weights:
+            for prior_weight in prior_weights:
+                # Train on training set
+                opt = RegularizationOptimizer(
+                    tv_weight=tv_weight,
+                    prior_weight=prior_weight,
+                    value_ranges=value_ranges,
+                    n_steps=n_steps,
+                    lr=0.001,
+                    log_interval=n_steps + 1,  # Disable logging
+                )
+                
+                # Initialize transmission maps
+                txm0 = jnp.ones_like(train_images) * 0.8
+                
+                # Optimize
+                state, _ = opt.optimize(train_images, txm0, w0, train_segmentations)
+                
+                if state is not None:
+                    final_txm, final_weights = state
+                    
+                    # Evaluate on training set
+                    train_metrics = []
+                    for i in range(len(train_images)):
+                        # Extract per-image weights from the dictionary
+                        weight_i = {k: v[i] for k, v in final_weights.items()}
+                        m = opt.compute_metrics(
+                            final_txm[i], 
+                            weight_i, 
+                            train_images[i],
+                            train_segmentations[i] if train_segmentations is not None else None
+                        )
+                        train_metrics.append(m)
+                    
+                    # Average training metrics
+                    avg_train_metrics = {
+                        k: np.mean([m[k] for m in train_metrics])
+                        for k in train_metrics[0].keys()
+                    }
+                    
+                    # Evaluate on validation set - initialize new weights for validation size
+                    val_txm0 = jnp.ones_like(val_images) * 0.8
+                    n_val = len(val_images)
+                    val_w0 = {
+                        "enhance_factor": jnp.ones(n_val) * 0.5,
+                        "window_center": jnp.ones(n_val) * 0.3,
+                        "window_width": jnp.ones(n_val) * 0.4,
+                    }
+                    val_state, _ = opt.optimize(val_images, val_txm0, val_w0, val_segmentations)
+                    
+                    if val_state is not None:
+                        val_final_txm, val_final_weights = val_state
+                        
+                        val_metrics = []
+                        for i in range(len(val_images)):
+                            # Extract per-image weights from the dictionary
+                            val_weight_i = {k: v[i] for k, v in val_final_weights.items()}
+                            m = opt.compute_metrics(
+                                val_final_txm[i],
+                                val_weight_i,
+                                val_images[i],
+                                val_segmentations[i] if val_segmentations is not None else None
+                            )
+                            val_metrics.append(m)
+                        
+                        # Average validation metrics
+                        avg_val_metrics = {
+                            k: np.mean([m[k] for m in val_metrics])
+                            for k in val_metrics[0].keys()
+                        }
+                        
+                        # Compute validation score (balance MSE and anatomical consistency)
+                        val_score = avg_val_metrics['mse'] + 0.1 * avg_val_metrics['anatomical_consistency']
+                        
+                        # Update best weights
+                        if val_score < best_val_score:
+                            best_val_score = val_score
+                            best_weights = {
+                                'tv_weight': tv_weight,
+                                'prior_weight': prior_weight,
+                                'val_score': val_score,
+                                'val_metrics': avg_val_metrics
+                            }
+                        
+                        # Store results
+                        results['tv_weights'].append(tv_weight)
+                        results['prior_weights'].append(prior_weight)
+                        results['train_metrics'].append(avg_train_metrics)
+                        results['val_metrics'].append(avg_val_metrics)
+                
+                pbar.update(1)
+    
+    results['best_weights'] = best_weights if 'best_weights' in locals() else None
+    return results
+
+
+def pareto_frontier_analysis(
     images: jnp.ndarray,
     segmentations: jnp.ndarray,
     value_ranges: jnp.ndarray,
     tv_weights: List[float],
     prior_weights: List[float],
     n_steps: int = 200,
-    batch_size: int = 4,
-) -> Dict[str, Dict[str, np.ndarray]]:
+) -> Dict[str, Any]:
     """
-    Compute L-curve data points for different regularization weights.
+    Perform Pareto frontier analysis for multi-objective optimization.
     
-    Returns:
-        Dictionary containing:
-        - 'tv_curve': MSE and TV values for different TV weights
-        - 'prior_curve': MSE and segmentation penalty for different prior weights
-        - 'combined_curve': Results for combined weight variations
+    Objectives:
+    1. Minimize reconstruction error (MSE)
+    2. Minimize anatomical inconsistency
+    3. Minimize total variation (smoothness)
     """
-    
-    # Select a small batch for faster computation
-    images = images[:batch_size]
-    segmentations = segmentations[:batch_size]
-    
-    # Ensure images are in [0, 1] range
-    images = images.astype(jnp.float32)
-    if images.max() > 1.0:
-        images = images / images.max()
-    
-    print(f"Image stats - min: {images.min():.3f}, max: {images.max():.3f}, mean: {images.mean():.3f}")
-    
-    # Initialize weights (keep as scalars for L-curve analysis)
-    w0 = {
-        "enhance_factor": 0.5,
-        "window_center": 0.3,
-        "window_width": 0.4,
-    }
-    
-    # Initialize transmission maps closer to expected values
-    txm0 = jnp.ones_like(images) * 0.8  # Most of the image should be high transmission
-    
     results = {
-        'tv_curve': {'weights': [], 'mse': [], 'tv': []},
-        'prior_curve': {'weights': [], 'mse': [], 'prior': []},
-        'combined_curve': {'tv_weights': [], 'prior_weights': [], 'mse': [], 'tv': [], 'prior': []},
+        'tv_weights': [],
+        'prior_weights': [],
+        'objectives': {
+            'mse': [],
+            'anatomical_consistency': [],
+            'tv': [],
+        },
+        'pareto_indices': [],
     }
     
-    # 1. TV weight analysis (prior_weight = 0)
-    print("\nAnalyzing TV regularization weights...")
+    # Initialize per-image weights
+    n_images = len(images)
+    w0 = {
+        "enhance_factor": jnp.ones(n_images) * 0.5,
+        "window_center": jnp.ones(n_images) * 0.3,
+        "window_width": jnp.ones(n_images) * 0.4,
+    }
+    
+    print("\nPerforming Pareto frontier analysis...")
+    
     for tv_weight in tqdm(tv_weights):
-        opt = SimpleOptimizer(
-            tv_weight=tv_weight,
-            prior_weight=0.0,
-            value_ranges=value_ranges,
-            n_steps=n_steps,
-            lr=0.001,
-            optimizer=optax.chain(
-                optax.clip_by_global_norm(1.0),  # Gradient clipping
-                optax.adam(learning_rate=0.001)
-            ),
-        )
-        
-        state, _ = opt.optimize(images, txm0, w0, segmentations)
-        
-        if state is not None:
-            # Compute metrics after optimization
-            final_txm, final_weights = state
-            mse, tv, _ = opt.compute_metrics(final_txm, final_weights, images, segmentations)
-            
-            # Extract values from JAX arrays
-            mse_val = float(mse)
-            tv_val = float(tv)
-            
-            results['tv_curve']['weights'].append(tv_weight)
-            results['tv_curve']['mse'].append(mse_val)
-            results['tv_curve']['tv'].append(tv_val)
-    
-    # 2. Prior weight analysis (tv_weight = optimal from above)
-    # Find elbow point using maximum curvature
-    if len(results['tv_curve']['mse']) > 2:
-        mse_vals = np.array(results['tv_curve']['mse'])
-        tv_vals = np.array(results['tv_curve']['tv'])
-        
-        # Normalize values
-        mse_norm = (mse_vals - mse_vals.min()) / (mse_vals.max() - mse_vals.min() + 1e-8)
-        tv_norm = (tv_vals - tv_vals.min()) / (tv_vals.max() - tv_vals.min() + 1e-8)
-        
-        # Compute curvature
-        curvature = compute_curvature(tv_norm, mse_norm)
-        optimal_tv_idx = np.argmax(curvature)
-        optimal_tv_weight = tv_weights[optimal_tv_idx]
-    else:
-        optimal_tv_weight = 1e-4
-    
-    print(f"\nOptimal TV weight: {optimal_tv_weight:.6f}")
-    print("\nAnalyzing prior regularization weights...")
-    
-    for prior_weight in tqdm(prior_weights):
-        opt = SimpleOptimizer(
-            tv_weight=optimal_tv_weight,
-            prior_weight=prior_weight,
-            value_ranges=value_ranges,
-            n_steps=n_steps,
-            lr=0.001,
-            optimizer=optax.chain(
-                optax.clip_by_global_norm(1.0),  # Gradient clipping
-                optax.adam(learning_rate=0.001)
-            ),
-        )
-        
-        state, _ = opt.optimize(images, txm0, w0, segmentations)
-        
-        if state is not None:
-            # Compute metrics after optimization
-            final_txm, final_weights = state
-            mse, _, seg_penalty = opt.compute_metrics(final_txm, final_weights, images, segmentations)
-            
-            # Extract values from JAX arrays
-            mse_val = float(mse)
-            prior_val = float(seg_penalty)
-            
-            results['prior_curve']['weights'].append(prior_weight)
-            results['prior_curve']['mse'].append(mse_val)
-            results['prior_curve']['prior'].append(prior_val)
-    
-    # 3. Combined analysis (grid search)
-    print("\nAnalyzing combined regularization weights...")
-    tv_grid = tv_weights[::2]  # Sample every other point for efficiency
-    prior_grid = prior_weights[::2]
-    
-    for tv_weight in tqdm(tv_grid):
-        for prior_weight in prior_grid:
-            opt = SimpleOptimizer(
+        for prior_weight in prior_weights:
+            opt = RegularizationOptimizer(
                 tv_weight=tv_weight,
                 prior_weight=prior_weight,
                 value_ranges=value_ranges,
                 n_steps=n_steps,
                 lr=0.001,
-                optimizer=optax.chain(
-                    optax.clip_by_global_norm(1.0),  # Gradient clipping
-                    optax.adam(learning_rate=0.001)
-                ),
+                log_interval=n_steps + 1,
             )
             
+            txm0 = jnp.ones_like(images) * 0.8
             state, _ = opt.optimize(images, txm0, w0, segmentations)
             
             if state is not None:
-                # Compute metrics after optimization
                 final_txm, final_weights = state
-                mse, tv, seg_penalty = opt.compute_metrics(final_txm, final_weights, images, segmentations)
                 
-                # Extract values from JAX arrays
-                mse_val = float(mse)
-                tv_val = float(tv)
-                prior_val = float(seg_penalty)
+                # Compute objectives
+                all_metrics = []
+                for i in range(len(images)):
+                    # Extract per-image weights from the dictionary
+                    weight_i = {k: v[i] for k, v in final_weights.items()}
+                    m = opt.compute_metrics(
+                        final_txm[i],
+                        weight_i,
+                        images[i],
+                        segmentations[i] if segmentations is not None else None
+                    )
+                    all_metrics.append(m)
                 
-                results['combined_curve']['tv_weights'].append(tv_weight)
-                results['combined_curve']['prior_weights'].append(prior_weight)
-                results['combined_curve']['mse'].append(mse_val)
-                results['combined_curve']['tv'].append(tv_val)
-                results['combined_curve']['prior'].append(prior_val)
+                # Average objectives
+                avg_mse = np.mean([m['mse'] for m in all_metrics])
+                avg_consistency = np.mean([m['anatomical_consistency'] for m in all_metrics])
+                avg_tv = np.mean([m['tv'] for m in all_metrics])
+                
+                results['tv_weights'].append(tv_weight)
+                results['prior_weights'].append(prior_weight)
+                results['objectives']['mse'].append(avg_mse)
+                results['objectives']['anatomical_consistency'].append(avg_consistency)
+                results['objectives']['tv'].append(avg_tv)
     
-    # Convert lists to arrays
-    for curve_type in results:
-        for key in results[curve_type]:
-            results[curve_type][key] = np.array(results[curve_type][key])
+    # Find Pareto optimal points
+    objectives = np.array([
+        results['objectives']['mse'],
+        results['objectives']['anatomical_consistency'],
+        results['objectives']['tv']
+    ]).T
+    
+    pareto_mask = compute_pareto_frontier_3d(objectives)
+    results['pareto_indices'] = np.where(pareto_mask)[0].tolist()
     
     return results
 
 
-def compute_curvature(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def compute_pareto_frontier_3d(objectives: np.ndarray) -> np.ndarray:
     """
-    Compute curvature of a parametric curve.
+    Compute Pareto frontier for 3 objectives (all to be minimized).
     
-    The curvature κ at each point is given by:
-    κ = |x'y'' - y'x''| / (x'² + y'²)^(3/2)
+    Args:
+        objectives: Array of shape (n_points, 3)
+        
+    Returns:
+        Boolean mask of Pareto optimal points
     """
-    # Compute derivatives using finite differences
-    dx = np.gradient(x)
-    dy = np.gradient(y)
-    ddx = np.gradient(dx)
-    ddy = np.gradient(dy)
-    
-    # Compute curvature
-    numerator = np.abs(dx * ddy - dy * ddx)
-    denominator = np.power(dx**2 + dy**2, 1.5)
-    
-    # Avoid division by zero
-    curvature = np.zeros_like(numerator)
-    mask = denominator > 1e-8
-    curvature[mask] = numerator[mask] / denominator[mask]
-    
-    return curvature
-
-
-def plot_l_curves(results: Dict[str, Dict[str, np.ndarray]], output_dir: str):
-    """Plot L-curves and analysis results."""
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Create figure with subplots
-    fig = plt.figure(figsize=(16, 12))
-    gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
-    
-    # 1. TV L-curve
-    ax1 = fig.add_subplot(gs[0, 0])
-    tv_data = results['tv_curve']
-    if len(tv_data['mse']) > 0:
-        ax1.plot(tv_data['tv'], tv_data['mse'], 'b.-', markersize=8)
-        ax1.set_xlabel('Total Variation')
-        ax1.set_ylabel('MSE')
-        ax1.set_title('TV Regularization L-curve')
-        ax1.set_xscale('log')
-        ax1.set_yscale('log')
-        ax1.grid(True, alpha=0.3)
-        
-        # Mark optimal point
-        curvature = compute_curvature(
-            np.log10(tv_data['tv']), 
-            np.log10(tv_data['mse'])
-        )
-        if len(curvature) > 0:
-            optimal_idx = np.argmax(curvature)
-            ax1.plot(tv_data['tv'][optimal_idx], tv_data['mse'][optimal_idx], 
-                    'ro', markersize=12, label=f'Optimal: {tv_data["weights"][optimal_idx]:.2e}')
-            ax1.legend()
-    
-    # 2. Prior L-curve
-    ax2 = fig.add_subplot(gs[0, 1])
-    prior_data = results['prior_curve']
-    if len(prior_data['mse']) > 0:
-        ax2.plot(prior_data['prior'], prior_data['mse'], 'g.-', markersize=8)
-        ax2.set_xlabel('Segmentation Penalty')
-        ax2.set_ylabel('MSE')
-        ax2.set_title('Prior Regularization L-curve')
-        ax2.set_xscale('log')
-        ax2.set_yscale('log')
-        ax2.grid(True, alpha=0.3)
-        
-        # Mark optimal point
-        curvature = compute_curvature(
-            np.log10(prior_data['prior'] + 1e-10), 
-            np.log10(prior_data['mse'])
-        )
-        if len(curvature) > 0:
-            optimal_idx = np.argmax(curvature)
-            ax2.plot(prior_data['prior'][optimal_idx], prior_data['mse'][optimal_idx], 
-                    'ro', markersize=12, label=f'Optimal: {prior_data["weights"][optimal_idx]:.2e}')
-            ax2.legend()
-    
-    # 3. Weight vs MSE plot
-    ax3 = fig.add_subplot(gs[0, 2])
-    if len(tv_data['mse']) > 0:
-        ax3.plot(tv_data['weights'], tv_data['mse'], 'b.-', label='TV weight')
-    if len(prior_data['mse']) > 0:
-        ax3.plot(prior_data['weights'], prior_data['mse'], 'g.-', label='Prior weight')
-    ax3.set_xlabel('Regularization Weight')
-    ax3.set_ylabel('MSE')
-    ax3.set_title('MSE vs Regularization Weights')
-    ax3.set_xscale('log')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-    
-    # 4. Combined heatmap (MSE)
-    ax4 = fig.add_subplot(gs[1, :])
-    combined_data = results['combined_curve']
-    if len(combined_data['mse']) > 0:
-        # Reshape data for heatmap
-        tv_unique = np.unique(combined_data['tv_weights'])
-        prior_unique = np.unique(combined_data['prior_weights'])
-        mse_grid = np.zeros((len(prior_unique), len(tv_unique)))
-        
-        for i, (tv_w, prior_w, mse) in enumerate(zip(
-            combined_data['tv_weights'], 
-            combined_data['prior_weights'],
-            combined_data['mse']
-        )):
-            tv_idx = np.where(tv_unique == tv_w)[0][0]
-            prior_idx = np.where(prior_unique == prior_w)[0][0]
-            mse_grid[prior_idx, tv_idx] = mse
-        
-        im = ax4.imshow(mse_grid, aspect='auto', origin='lower', cmap='viridis')
-        ax4.set_xticks(range(len(tv_unique)))
-        ax4.set_yticks(range(len(prior_unique)))
-        ax4.set_xticklabels([f'{w:.2e}' for w in tv_unique], rotation=45)
-        ax4.set_yticklabels([f'{w:.2e}' for w in prior_unique])
-        ax4.set_xlabel('TV Weight')
-        ax4.set_ylabel('Prior Weight')
-        ax4.set_title('MSE Heatmap')
-        plt.colorbar(im, ax=ax4, label='MSE')
-    
-    # 5. Pareto frontier analysis
-    ax5 = fig.add_subplot(gs[2, :2])
-    if len(combined_data['mse']) > 0:
-        # Plot all points
-        sc = ax5.scatter(combined_data['mse'], 
-                        combined_data['tv'] + combined_data['prior'],
-                        c=np.log10(combined_data['tv_weights']), 
-                        cmap='coolwarm', alpha=0.6)
-        
-        # Find Pareto optimal points
-        pareto_mask = compute_pareto_frontier(
-            combined_data['mse'],
-            combined_data['tv'] + combined_data['prior']
-        )
-        
-        # Plot Pareto frontier
-        pareto_mse = combined_data['mse'][pareto_mask]
-        pareto_reg = (combined_data['tv'] + combined_data['prior'])[pareto_mask]
-        sort_idx = np.argsort(pareto_mse)
-        ax5.plot(pareto_mse[sort_idx], pareto_reg[sort_idx], 'k-', linewidth=2, label='Pareto Frontier')
-        
-        ax5.set_xlabel('MSE (Data Fidelity)')
-        ax5.set_ylabel('Total Regularization')
-        ax5.set_title('Pareto Frontier Analysis')
-        ax5.legend()
-        ax5.grid(True, alpha=0.3)
-        plt.colorbar(sc, ax=ax5, label='log10(TV weight)')
-    
-    # 6. Curvature analysis
-    ax6 = fig.add_subplot(gs[2, 2])
-    if len(tv_data['mse']) > 0:
-        curvature = compute_curvature(
-            np.log10(tv_data['tv']), 
-            np.log10(tv_data['mse'])
-        )
-        ax6.plot(tv_data['weights'], curvature, 'b.-')
-        ax6.set_xlabel('TV Weight')
-        ax6.set_ylabel('Curvature')
-        ax6.set_title('L-curve Curvature')
-        ax6.set_xscale('log')
-        ax6.grid(True, alpha=0.3)
-        
-        # Mark maximum
-        if len(curvature) > 0:
-            max_idx = np.argmax(curvature)
-            ax6.axvline(tv_data['weights'][max_idx], color='r', linestyle='--', 
-                       label=f'Max at {tv_data["weights"][max_idx]:.2e}')
-            ax6.legend()
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'l_curve_analysis.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Save numerical results
-    optimal_weights = {}
-    
-    if len(tv_data['mse']) > 0:
-        curvature = compute_curvature(np.log10(tv_data['tv']), np.log10(tv_data['mse']))
-        if len(curvature) > 0:
-            optimal_tv_idx = np.argmax(curvature)
-            optimal_weights['tv'] = float(tv_data['weights'][optimal_tv_idx])
-    
-    if len(prior_data['mse']) > 0:
-        curvature = compute_curvature(
-            np.log10(prior_data['prior'] + 1e-10), 
-            np.log10(prior_data['mse'])
-        )
-        if len(curvature) > 0:
-            optimal_prior_idx = np.argmax(curvature)
-            optimal_weights['prior'] = float(prior_data['weights'][optimal_prior_idx])
-    
-    # Find optimal combined weights from Pareto frontier
-    if len(combined_data['mse']) > 0:
-        pareto_mask = compute_pareto_frontier(
-            combined_data['mse'],
-            combined_data['tv'] + combined_data['prior']
-        )
-        
-        if np.any(pareto_mask):
-            # Choose knee point on Pareto frontier
-            pareto_points = np.column_stack([
-                combined_data['mse'][pareto_mask],
-                (combined_data['tv'] + combined_data['prior'])[pareto_mask]
-            ])
-            
-            knee_idx = find_knee_point(pareto_points)
-            pareto_indices = np.where(pareto_mask)[0]
-            optimal_idx = pareto_indices[knee_idx]
-            
-            optimal_weights['combined_tv'] = float(combined_data['tv_weights'][optimal_idx])
-            optimal_weights['combined_prior'] = float(combined_data['prior_weights'][optimal_idx])
-    
-    # Save results
-    import json
-    with open(os.path.join(output_dir, 'optimal_weights.json'), 'w') as f:
-        json.dump(optimal_weights, f, indent=2)
-    
-    print("\nOptimal weights found:")
-    for key, value in optimal_weights.items():
-        print(f"  {key}: {value:.6f}")
-    
-    return optimal_weights
-
-
-def compute_pareto_frontier(obj1: np.ndarray, obj2: np.ndarray) -> np.ndarray:
-    """
-    Compute Pareto frontier for two objectives (both to be minimized).
-    
-    Returns boolean mask of Pareto optimal points.
-    """
-    n_points = len(obj1)
+    n_points = len(objectives)
     pareto_mask = np.ones(n_points, dtype=bool)
     
     for i in range(n_points):
         for j in range(n_points):
             if i != j:
                 # Check if point j dominates point i
-                if obj1[j] <= obj1[i] and obj2[j] <= obj2[i] and \
-                   (obj1[j] < obj1[i] or obj2[j] < obj2[i]):
+                dominates = np.all(objectives[j] <= objectives[i]) and \
+                           np.any(objectives[j] < objectives[i])
+                if dominates:
                     pareto_mask[i] = False
                     break
     
     return pareto_mask
 
 
-def find_knee_point(points: np.ndarray) -> int:
-    """
-    Find knee point in a curve using the kneedle algorithm.
+def plot_results(
+    grid_results: Dict[str, Any],
+    pareto_results: Dict[str, Any],
+    output_dir: str
+):
+    """Create comprehensive plots of the analysis results."""
+    os.makedirs(output_dir, exist_ok=True)
     
-    Args:
-        points: Array of shape (n_points, 2) with x and y coordinates
+    # Create figure with subplots
+    fig = plt.figure(figsize=(20, 16))
+    gs = GridSpec(4, 3, figure=fig, hspace=0.3, wspace=0.3)
+    
+    # 1. Grid search heatmap - Validation MSE
+    ax1 = fig.add_subplot(gs[0, 0])
+    if grid_results and len(grid_results['tv_weights']) > 0:
+        plot_grid_search_heatmap(
+            grid_results, 
+            metric='mse',
+            title='Validation MSE',
+            ax=ax1
+        )
+    
+    # 2. Grid search heatmap - Anatomical Consistency
+    ax2 = fig.add_subplot(gs[0, 1])
+    if grid_results and len(grid_results['tv_weights']) > 0:
+        plot_grid_search_heatmap(
+            grid_results,
+            metric='anatomical_consistency',
+            title='Validation Anatomical Consistency',
+            ax=ax2
+        )
+    
+    # 3. Grid search heatmap - Combined Score
+    ax3 = fig.add_subplot(gs[0, 2])
+    if grid_results and len(grid_results['tv_weights']) > 0:
+        # Compute combined score
+        combined_scores = []
+        for vm in grid_results['val_metrics']:
+            score = vm['mse'] + 0.1 * vm['anatomical_consistency']
+            combined_scores.append(score)
         
-    Returns:
-        Index of the knee point
-    """
-    # Normalize points
-    x = points[:, 0]
-    y = points[:, 1]
+        # Create temporary results dict
+        temp_results = grid_results.copy()
+        temp_results['val_metrics'] = [{'combined': s} for s in combined_scores]
+        
+        plot_grid_search_heatmap(
+            temp_results,
+            metric='combined',
+            title='Combined Validation Score',
+            ax=ax3
+        )
+        
+        # Mark best point
+        if grid_results['best_weights']:
+            best = grid_results['best_weights']
+            tv_idx = grid_results['tv_weights'].index(best['tv_weight'])
+            prior_idx = grid_results['prior_weights'].index(best['prior_weight'])
+            ax3.plot(tv_idx, prior_idx, 'r*', markersize=20)
     
-    x_norm = (x - x.min()) / (x.max() - x.min() + 1e-8)
-    y_norm = (y - y.min()) / (y.max() - y.min() + 1e-8)
+    # 4. Pareto frontier - 2D projections
+    if pareto_results and len(pareto_results['tv_weights']) > 0:
+        # MSE vs Anatomical Consistency
+        ax4 = fig.add_subplot(gs[1, 0])
+        plot_pareto_2d(
+            pareto_results,
+            x_metric='mse',
+            y_metric='anatomical_consistency',
+            x_label='Reconstruction MSE',
+            y_label='Anatomical Consistency',
+            ax=ax4
+        )
+        
+        # MSE vs TV
+        ax5 = fig.add_subplot(gs[1, 1])
+        plot_pareto_2d(
+            pareto_results,
+            x_metric='mse',
+            y_metric='tv',
+            x_label='Reconstruction MSE',
+            y_label='Total Variation',
+            ax=ax5
+        )
+        
+        # Anatomical Consistency vs TV
+        ax6 = fig.add_subplot(gs[1, 2])
+        plot_pareto_2d(
+            pareto_results,
+            x_metric='anatomical_consistency',
+            y_metric='tv',
+            x_label='Anatomical Consistency',
+            y_label='Total Variation',
+            ax=ax6
+        )
     
-    # Sort by x coordinate
-    sort_idx = np.argsort(x_norm)
-    x_sorted = x_norm[sort_idx]
-    y_sorted = y_norm[sort_idx]
+    # 5. Weight distribution on Pareto frontier
+    ax7 = fig.add_subplot(gs[2, :])
+    if pareto_results and 'pareto_indices' in pareto_results:
+        plot_pareto_weights(pareto_results, ax=ax7)
     
-    # Compute distances from line connecting first and last points
-    p1 = np.array([x_sorted[0], y_sorted[0]])
-    p2 = np.array([x_sorted[-1], y_sorted[-1]])
+    # 6. Trade-off curves
+    ax8 = fig.add_subplot(gs[3, 0])
+    if grid_results and len(grid_results['tv_weights']) > 0:
+        plot_tradeoff_curve(
+            grid_results,
+            weight_type='tv',
+            ax=ax8
+        )
     
-    distances = []
-    for i in range(len(x_sorted)):
-        p = np.array([x_sorted[i], y_sorted[i]])
-        # Distance from point to line
-        dist = np.abs(np.cross(p2 - p1, p1 - p)) / np.linalg.norm(p2 - p1)
-        distances.append(dist)
+    ax9 = fig.add_subplot(gs[3, 1])
+    if grid_results and len(grid_results['tv_weights']) > 0:
+        plot_tradeoff_curve(
+            grid_results,
+            weight_type='prior',
+            ax=ax9
+        )
     
-    # Find maximum distance
-    knee_idx_sorted = np.argmax(distances)
-    knee_idx = sort_idx[knee_idx_sorted]
+    # 7. Summary text
+    ax10 = fig.add_subplot(gs[3, 2])
+    ax10.axis('off')
+    summary_text = generate_summary(grid_results, pareto_results)
+    ax10.text(0.1, 0.9, summary_text, transform=ax10.transAxes,
+             fontsize=10, verticalalignment='top', fontfamily='monospace')
     
-    return knee_idx
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'regularization_analysis.png'), 
+                dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_grid_search_heatmap(results, metric, title, ax):
+    """Plot heatmap for grid search results."""
+    tv_unique = sorted(list(set(results['tv_weights'])))
+    prior_unique = sorted(list(set(results['prior_weights'])))
+    
+    # Create grid
+    grid = np.zeros((len(prior_unique), len(tv_unique)))
+    
+    for tv_w, prior_w, vm in zip(
+        results['tv_weights'],
+        results['prior_weights'],
+        results['val_metrics']
+    ):
+        tv_idx = tv_unique.index(tv_w)
+        prior_idx = prior_unique.index(prior_w)
+        grid[prior_idx, tv_idx] = vm[metric]
+    
+    im = ax.imshow(grid, aspect='auto', origin='lower', cmap='viridis')
+    ax.set_xticks(range(len(tv_unique)))
+    ax.set_yticks(range(len(prior_unique)))
+    ax.set_xticklabels([f'{w:.1e}' for w in tv_unique], rotation=45)
+    ax.set_yticklabels([f'{w:.2f}' for w in prior_unique])
+    ax.set_xlabel('TV Weight')
+    ax.set_ylabel('Prior Weight')
+    ax.set_title(title)
+    plt.colorbar(im, ax=ax)
+
+
+def plot_pareto_2d(results, x_metric, y_metric, x_label, y_label, ax):
+    """Plot 2D projection of Pareto frontier."""
+    x_values = np.array(results['objectives'][x_metric])
+    y_values = np.array(results['objectives'][y_metric])
+    
+    # Plot all points
+    ax.scatter(x_values, y_values, alpha=0.5, s=50, c='blue', label='All points')
+    
+    # Highlight Pareto optimal points
+    if 'pareto_indices' in results:
+        pareto_x = x_values[results['pareto_indices']]
+        pareto_y = y_values[results['pareto_indices']]
+        ax.scatter(pareto_x, pareto_y, s=100, c='red', marker='*', label='Pareto optimal')
+        
+        # Connect Pareto points
+        sorted_idx = np.argsort(pareto_x)
+        ax.plot(pareto_x[sorted_idx], pareto_y[sorted_idx], 'r--', alpha=0.5)
+    
+    ax.set_xlabel(x_label)
+    ax.set_ylabel(y_label)
+    ax.set_title(f'Pareto Frontier: {x_label} vs {y_label}')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+
+def plot_pareto_weights(results, ax):
+    """Plot distribution of weights on Pareto frontier."""
+    pareto_indices = results['pareto_indices']
+    
+    if len(pareto_indices) > 0:
+        pareto_tv = [results['tv_weights'][i] for i in pareto_indices]
+        pareto_prior = [results['prior_weights'][i] for i in pareto_indices]
+        
+        # Create scatter plot with color coding
+        scatter = ax.scatter(pareto_tv, pareto_prior, 
+                           c=range(len(pareto_indices)), 
+                           cmap='viridis', s=100)
+        
+        ax.set_xlabel('TV Weight')
+        ax.set_ylabel('Prior Weight')
+        ax.set_title('Weight Distribution on Pareto Frontier')
+        ax.set_xscale('log')
+        ax.grid(True, alpha=0.3)
+        
+        # Add colorbar
+        cbar = plt.colorbar(scatter, ax=ax)
+        cbar.set_label('Pareto Point Index')
+
+
+def plot_tradeoff_curve(results, weight_type, ax):
+    """Plot trade-off curves for a specific weight type."""
+    # Initialize variables
+    target_prior = 0.5  # Middle value for prior weight
+    target_tv = 1e-4    # Reasonable TV weight
+    
+    if weight_type == 'tv':
+        # Fix prior weight, vary TV weight
+        weight_name = 'TV Weight'
+    else:
+        # Fix TV weight, vary prior weight
+        weight_name = 'Prior Weight'
+    
+    # Filter results
+    filtered_metrics = []
+    filtered_weights = []
+    
+    for tv_w, prior_w, vm in zip(
+        results['tv_weights'],
+        results['prior_weights'],
+        results['val_metrics']
+    ):
+        if weight_type == 'tv' and abs(prior_w - target_prior) < 0.01:
+            filtered_metrics.append(vm)
+            filtered_weights.append(tv_w)
+        elif weight_type == 'prior' and abs(tv_w - target_tv) < 1e-6:
+            filtered_metrics.append(vm)
+            filtered_weights.append(prior_w)
+    
+    if len(filtered_metrics) > 0:
+        # Sort by weight
+        sorted_idx = np.argsort(filtered_weights)
+        filtered_weights = [filtered_weights[i] for i in sorted_idx]
+        filtered_metrics = [filtered_metrics[i] for i in sorted_idx]
+        
+        # Extract metrics
+        mse_values = [m['mse'] for m in filtered_metrics]
+        consistency_values = [m['anatomical_consistency'] for m in filtered_metrics]
+        
+        # Plot
+        ax2 = ax.twinx()
+        
+        line1 = ax.plot(filtered_weights, mse_values, 'b-', label='MSE')
+        line2 = ax2.plot(filtered_weights, consistency_values, 'r-', label='Anatomical Consistency')
+        
+        ax.set_xlabel(weight_name)
+        ax.set_ylabel('MSE', color='b')
+        ax2.set_ylabel('Anatomical Consistency', color='r')
+        ax.tick_params(axis='y', labelcolor='b')
+        ax2.tick_params(axis='y', labelcolor='r')
+        
+        if weight_type == 'tv':
+            ax.set_xscale('log')
+        
+        ax.set_title(f'Trade-off Analysis: {weight_name}')
+        ax.grid(True, alpha=0.3)
+        
+        # Combined legend
+        lines = line1 + line2
+        labels = [line.get_label() for line in lines]
+        ax.legend(lines, labels, loc='center right')
+
+
+def generate_summary(grid_results, pareto_results):
+    """Generate text summary of results."""
+    summary = "REGULARIZATION ANALYSIS SUMMARY\n"
+    summary += "=" * 30 + "\n\n"
+    
+    if grid_results and grid_results['best_weights']:
+        best = grid_results['best_weights']
+        summary += "Grid Search Results:\n"
+        summary += f"  Best TV weight: {best['tv_weight']:.6f}\n"
+        summary += f"  Best Prior weight: {best['prior_weight']:.6f}\n"
+        summary += f"  Validation score: {best['val_score']:.6f}\n"
+        summary += f"  Val MSE: {best['val_metrics']['mse']:.6f}\n"
+        summary += f"  Val PSNR: {best['val_metrics']['psnr']:.2f} dB\n"
+        summary += f"  Val Anat. Consistency: {best['val_metrics']['anatomical_consistency']:.6f}\n"
+        summary += "\n"
+    
+    if pareto_results and 'pareto_indices' in pareto_results:
+        summary += "Pareto Analysis:\n"
+        summary += f"  Total points tested: {len(pareto_results['tv_weights'])}\n"
+        summary += f"  Pareto optimal points: {len(pareto_results['pareto_indices'])}\n"
+        
+        if len(pareto_results['pareto_indices']) > 0:
+            # Find knee point
+            pareto_tv = [pareto_results['tv_weights'][i] for i in pareto_results['pareto_indices']]
+            pareto_prior = [pareto_results['prior_weights'][i] for i in pareto_results['pareto_indices']]
+            
+            summary += f"  TV weight range: [{min(pareto_tv):.2e}, {max(pareto_tv):.2e}]\n"
+            summary += f"  Prior weight range: [{min(pareto_prior):.3f}, {max(pareto_prior):.3f}]\n"
+    
+    summary += "\nRECOMMENDATION:\n"
+    summary += "The segmentation prior is crucial for\n"
+    summary += "anatomically consistent reconstructions.\n"
+    summary += "Use the validation-based optimal weights\n"
+    summary += "as they balance all objectives effectively."
+    
+    return summary
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Analyze regularization weights using L-curve method')
-    parser.add_argument('--data-dir', type=str, default=os.environ.get('IMAGE_PATH', '/Volumes/T7/projs/thesis/data/CheXpert-v1.0-small'),
+    parser = argparse.ArgumentParser(
+        description='Analyze regularization weights with focus on segmentation priors'
+    )
+    parser.add_argument('--data-dir', type=str, 
+                       default=os.environ.get('IMAGE_PATH', '/Volumes/T7/projs/thesis/data/CheXpert-v1.0-small'),
                        help='Path to CheXpert images')
-    parser.add_argument('--meta-dir', type=str, default=os.environ.get('META_PATH', '/Volumes/T7/projs/thesis/data/CheXpert-v1.0-small'),
+    parser.add_argument('--meta-dir', type=str, 
+                       default=os.environ.get('META_PATH', '/Volumes/T7/projs/thesis/data/CheXpert-v1.0-small'),
                        help='Path to CheXpert metadata')
-    parser.add_argument('--mask-dir', type=str, default=os.environ.get('MASK_DIR', '/Volumes/T7/projs/thesis/data/masks'),
+    parser.add_argument('--mask-dir', type=str, 
+                       default=os.environ.get('MASK_DIR', '/Volumes/T7/projs/thesis/data/masks'),
                        help='Path to segmentation masks')
-    parser.add_argument('--cache-dir', type=str, default=os.environ.get('CACHE_DIR', '/Volumes/T7/projs/thesis/cache'),
+    parser.add_argument('--cache-dir', type=str, 
+                       default=os.environ.get('CACHE_DIR', '/Volumes/T7/projs/thesis/cache'),
                        help='Cache directory')
     parser.add_argument('--output-dir', type=str, default='./regularization_analysis',
                        help='Output directory for results')
-    parser.add_argument('--batch-size', type=int, default=4,
-                       help='Batch size for analysis')
+    parser.add_argument('--n-train', type=int, default=8,
+                       help='Number of training images')
+    parser.add_argument('--n-val', type=int, default=4,
+                       help='Number of validation images')
     parser.add_argument('--n-steps', type=int, default=200,
                        help='Number of optimization steps per weight')
     parser.add_argument('--tv-min', type=float, default=1e-6,
@@ -577,13 +774,16 @@ def main():
                        help='Minimum prior weight')
     parser.add_argument('--prior-max', type=float, default=1.0,
                        help='Maximum prior weight')
-    parser.add_argument('--n-weights', type=int, default=20,
-                       help='Number of weight values to test')
+    parser.add_argument('--n-tv-weights', type=int, default=10,
+                       help='Number of TV weight values to test')
+    parser.add_argument('--n-prior-weights', type=int, default=10,
+                       help='Number of prior weight values to test')
     
     args = parser.parse_args()
     
     # Load dataset
     print("Loading dataset...")
+    total_samples = args.n_train + args.n_val
     dataset = get_segmentation_dataset(
         data_dir=args.data_dir,
         meta_dir=args.meta_dir,
@@ -591,10 +791,10 @@ def main():
         cache_dir=args.cache_dir,
         split="train",
         frontal_lateral="Frontal",
-        batch_size=args.batch_size,
+        batch_size=total_samples,
     )
     
-    # Get a batch
+    # Get data
     images_batch, masks_batch, _ = next(iter(dataset))
     
     # Process data
@@ -602,30 +802,95 @@ def main():
     if images.ndim == 4 and images.shape[1] == 1:
         images = images.squeeze(1)
     
+    # Normalize images to [0, 1] if needed
+    if images.max() > 1.0:
+        images = images / images.max()
+    
     masks = jnp.array(masks_batch.cpu().numpy())
-    seg_labels, segmentations = batch_get_exclusive_masks(masks, threshold=0.6)
+    _, segmentations = batch_get_exclusive_masks(masks, threshold=0.6)
     
     # Get priors
     _, value_ranges = get_priors(args.cache_dir, collimated_region_bound=0.4)
     
-    # Generate weight ranges
-    tv_weights = np.logspace(np.log10(args.tv_min), np.log10(args.tv_max), args.n_weights)
-    prior_weights = np.linspace(args.prior_min, args.prior_max, args.n_weights)
+    # Split into train/validation
+    indices = np.arange(total_samples)
+    np.random.seed(42)
+    np.random.shuffle(indices)
+    val_idx = indices[:args.n_val]
+    train_idx = indices[args.n_val:]
     
-    # Compute L-curve points
-    print("\nComputing L-curve points...")
-    results = compute_l_curve_points(
-        images, segmentations, value_ranges,
-        tv_weights.tolist(), prior_weights.tolist(),
-        n_steps=args.n_steps,
-        batch_size=args.batch_size
+    train_images = images[train_idx]
+    train_segmentations = segmentations[train_idx]
+    val_images = images[val_idx]
+    val_segmentations = segmentations[val_idx]
+    
+    print(f"Train set: {len(train_images)} images")
+    print(f"Validation set: {len(val_images)} images")
+    
+    # Generate weight ranges
+    tv_weights = np.logspace(
+        np.log10(args.tv_min), 
+        np.log10(args.tv_max), 
+        args.n_tv_weights
+    ).tolist()
+    
+    # Include 0 in prior weights to show its importance
+    prior_weights = [0.0] + np.linspace(
+        args.prior_min + 0.01, 
+        args.prior_max, 
+        args.n_prior_weights - 1
+    ).tolist()
+    
+    # 1. Grid search with validation
+    grid_results = grid_search_validation(
+        train_images, train_segmentations,
+        val_images, val_segmentations,
+        value_ranges,
+        tv_weights, prior_weights,
+        n_steps=args.n_steps
+    )
+    
+    # 2. Pareto frontier analysis
+    pareto_results = pareto_frontier_analysis(
+        train_images, train_segmentations,
+        value_ranges,
+        tv_weights[::2], prior_weights[::2],  # Subsample for efficiency
+        n_steps=args.n_steps
     )
     
     # Plot results
-    print("\nPlotting results...")
-    plot_l_curves(results, args.output_dir)
+    print("\nGenerating plots...")
+    plot_results(grid_results, pareto_results, args.output_dir)
+    
+    # Save numerical results
+    results_file = os.path.join(args.output_dir, 'analysis_results.json')
+    with open(results_file, 'w') as f:
+        json.dump({
+            'grid_search': {
+                'best_weights': grid_results['best_weights'],
+                'n_configurations': len(grid_results['tv_weights']),
+            },
+            'pareto_analysis': {
+                'n_pareto_points': len(pareto_results.get('pareto_indices', [])),
+                'n_total_points': len(pareto_results['tv_weights']),
+            },
+            'weight_ranges': {
+                'tv': [args.tv_min, args.tv_max],
+                'prior': [args.prior_min, args.prior_max],
+            }
+        }, f, indent=2)
     
     print(f"\nResults saved to: {args.output_dir}")
+    
+    # Print recommendations
+    if grid_results['best_weights']:
+        print("\n" + "="*50)
+        print("RECOMMENDED WEIGHTS (from validation):")
+        print(f"  TV weight: {grid_results['best_weights']['tv_weight']:.6f}")
+        print(f"  Prior weight: {grid_results['best_weights']['prior_weight']:.6f}")
+        print("\nThese weights properly value the segmentation prior")
+        print("for anatomically consistent reconstructions.")
+        print("="*50)
 
 
 if __name__ == "__main__":

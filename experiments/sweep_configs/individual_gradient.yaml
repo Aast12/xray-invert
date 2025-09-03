@@ -1,81 +1,83 @@
 name: individual_gradient_optimization
 method: bayes
 metric:
-  name: ssim_mean 
-  goal: maximize
+  name: ms_ssim_l1_max
+  goal: minimize 
+early_terminate:
+  type: hyperband
+  strict: true
 parameters:
   # Base hyperparameters similar to optimal.yaml
-  lr: 
-    value: 0.001
-  # lr:
-  #   min: 0.001
-  #   max: 0.03  # Slightly lower max since individual gradients can be more focused
-  txm_lr:
-    min: 0.0001
-    max: 0.03
-  weights_lr:
+  variant:
+    value: double-band
+  lr:
     min: 0.001
-    max: 0.06
+    max: 0.03 
   max_sigma:
-    value: 3.0
+    value: 4.0
+  sigma:
+    min: 1.5
+    max: 2.0
+  high_sigma:
+    min: 5.0
+    max: 7.0
   data_fidelity:
-    values:
-      # - l2
-      - ssim
+    value: l2
+    # values:
+    #   - l2
+      # - ssim
   max_enhancement:
-    min: 0.5
-    max: 0.75
+    value: 0.8
+    # min: 0.5
+    # max: 0.75
   n_steps:
     values:
       - 300
       - 500
   total_variation:
-    min: 0.00001
-    max: 0.0001
+    # value: 0.
+    min: 0.00000001
+    max: 0.000003
   prior_weight:
-    min: 0.1
-    max: 0.8
-  gmse_weight:
-    value: 0.0
-  #   min: 0.0
-  #   max: 0.8
+    min: 0.8
+    max: 1.0 
   PRNGKey:
     value: 0
   tm_init_params:
-    value:
-      - negative
-      - null
+    values: 
+      - - negative
+        - null
+      - - naive 
+        - null
   constant_weights:
     value: false
   eps:
     value: 1.e-6
   smooth_metric:
-    values:
-      # - tv
-      - tikonov
-      - tv2
+    value: tikonov
+    # values:
+      # # - tv
+      # - tikonov
+      # - none
+      # - tv2
   use_band_similarity:
     value: false
     # values:
     #   - true
     #   - false
   windowing_type:
-    values:
-      - sigmoid
-      - linear
+    value: sigmoid
+    # values:
+    #   - sigmoid
+    #   - linear
   
   # Individual gradient optimizer specific parameters
-  txm_optimizer:
+  optimizer:
     values:
-      - adam
+      # - adam
       - amsgrad
       # - rmsprop
-      - adamw
-  weights_optimizer:
-    values:
-      - adam
-      # - rmsprop
-      - adamw
+      # - adamw
   # Optimizer-specific parameters
   momentum:
     value: 0.9  # For SGD
@@ -87,8 +89,8 @@ parameters:
     #   - 0.001
   
   batch_size:
-    value: 64 
+    value: 24
   # Sub-batch processing
   sub_batch_size:
     values:
-      - 32
+      - 8

@@ -1,0 +1,81 @@
+name: shared_gradient_optimization
+method: bayes
+metric:
+  name: ms_ssim_l1_max
+  goal: minimize 
+parameters:
+  # Base hyperparameters similar to optimal.yaml
+  lr:
+    min: 0.0001
+    max: 0.03 
+  max_sigma:
+    value: 4.0
+  sigma:
+    min: 1.0
+    max: 5.0
+  data_fidelity:
+    values:
+      # - l2
+      - ssim
+  max_enhancement:
+    min: 0.5
+    max: 0.75
+  n_steps:
+    values:
+      - 300
+      - 500
+  total_variation:
+    min: 0.00001
+    max: 0.0001
+  prior_weight:
+    min: 0.5
+    max: 1.0
+  PRNGKey:
+    value: 0
+  tm_init_params:
+    value:
+      - negative
+      - null
+  constant_weights:
+    value: false
+  eps:
+    value: 1.e-6
+  smooth_metric:
+    values:
+      - tv
+      # - tikonov
+      - none
+      # - tv2
+  use_band_similarity:
+    value: false
+    # values:
+    #   - true
+    #   - false
+  windowing_type:
+    values:
+      - sigmoid
+      - linear
+  
+  # Individual gradient optimizer specific parameters
+  optimizer:
+    values:
+      - adam
+      - amsgrad
+      # - rmsprop
+      - adamw
+  # Optimizer-specific parameters
+  momentum:
+    value: 0.9  # For SGD
+  weight_decay:
+    value: 0.0001
+    # values:
+    #   - 0.0
+    #   - 0.0001
+    #   - 0.001
+  
+  batch_size:
+    value: 64
+  # Sub-batch processing
+  sub_batch_size:
+    values:
+      - 32

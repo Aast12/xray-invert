@@ -37,14 +37,17 @@ def build_segmentation_model_inputs(
     hyperparams: Any,
     w0_state,
     common_weights: bool = False,
+    log = True
 ):
     images = inputs.images
     seg_labels = inputs.prior_labels
     value_ranges = inputs.priors
 
-    log_priors_table(seg_labels, value_ranges)
+    if log:
+        log_priors_table(seg_labels, value_ranges)
     init_mode, init_params = init.parse_init_params(hyperparams, images)
-    log_summary({"init_mode": init_mode})
+    if log:
+        log_summary({"init_mode": init_mode})
 
     txm0 = init.initialize(hyperparams.PRNGKey, images.shape, **init_params)
 

@@ -56,7 +56,7 @@ def parse_init_params(
     init_params: dict[str, Any] = dict(mode=init_mode)
     if init_mode in ["uniform", "normal"]:
         init_params["val_range"] = init_config
-    elif init_mode in ["target", "negative"]:
+    elif init_mode in ["target", "negative", "naive"]:
         init_params["target"] = images
 
     return init_mode, init_params
@@ -80,6 +80,9 @@ def initialize(
     elif mode == "negative":
         assert target is not None, "target must be provided for copy mode"
         return 1 - target.copy().astype(DTYPE)
+    elif mode == "naive":
+        assert target is not None, "target must be provided for copy mode"
+        return (1 - target.copy().astype(DTYPE)) / 2.0
     elif mode == "zeros":
         return jnp.zeros(shape, dtype=DTYPE) + 1e-6
     else:

@@ -32,7 +32,7 @@ def window(
     x = image
     x = (x - window_center) / window_width
     if windowing_type == "linear":
-        return jnp.clip(x + window_center, 0.0, 1.0)
+        return jnp.clip(x + 0.5, 0.0, 1.0)
     elif windowing_type == "sigmoid":
         return jax.nn.sigmoid(x * gamma)
 

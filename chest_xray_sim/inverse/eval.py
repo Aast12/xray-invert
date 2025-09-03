@@ -14,6 +14,7 @@ from ..types import (
 from .metrics import (
     batch_segmentation_sq_penalty,
     ms_ssim,
+    ms_ssim_l1,
     ssim,
     psnr,
     tikhonov,
@@ -35,6 +36,26 @@ class EvalMetrics:
     bound_compliance: Float[Array, "reduced_labels batch"]
     min_violations: Float[Array, "reduced_labels batch"]
     max_violations: Float[Array, "reduced_labels batch"]
+
+    def concat(self, other: "EvalMetrics") -> "EvalMetrics":
+        """Concatenate two EvalMetrics objects."""
+        try:
+            return EvalMetrics(
+                ssim=jnp.concatenate((self.ssim, other.ssim)),
+                ms_ssim=jnp.concatenate((self.ms_ssim, other.ms_ssim)),
+                psnr=jnp.concatenate((self.psnr, other.psnr)),
+                mse=jnp.concatenate((self.mse, other.mse)),
+                total_variation=jnp.concatenate((self.total_variation, other.total_variation)),
+                tikonov=jnp.concatenate((self.tikonov, other.tikonov)),
+                band_similarity=jnp.concatenate((self.band_similarity, other.band_similarity)),
+                penalties=jnp.concatenate((self.penalties, other.penalties), axis=0),
+                bound_compliance=jnp.concatenate((self.bound_compliance, other.bound_compliance), axis=1),
+                min_violations=jnp.concatenate((self.min_violations, other.min_violations), axis=1),
+                max_violations=jnp.concatenate((self.max_violations, other.max_violations), axis=1),
+            )
+        except ValueError as e:
+            print(self, other)
+            return self
 
 
 def bound_compliance(
@@ -97,7 +118,8 @@ def batch_evaluation(
     psnr_val = psnr(pred, images)
     ssim_val = ssim(pred, images)
 
-    ms_ssim_val = jax.vmap(ms_ssim, in_axes=(0, 0))(pred, images)
+    # ms_ssim_val = jax.vmap(ms_ssim, in_axes=(0, 0))(pred, images)
+    ms_ssim_val = jax.vmap(ms_ssim_l1, in_axes=(0, 0))(pred, images)
     mse_val = jnp.mean((pred - images) ** 2, axis=(-2, -1))
     penalties = batch_segmentation_sq_penalty(txm, segmentation, value_ranges)
     penalties = penalties.sum(axis=0)

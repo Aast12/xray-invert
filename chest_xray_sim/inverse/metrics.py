@@ -81,8 +81,7 @@ def total_variation(
     d1 = jnp.diff(image, axis=-2)
     d2 = jnp.diff(image, axis=-1)
 
-    tv = (d1**2).sum(axis=(-2, -1)) + (d2**2).sum(axis=(-2, -1))
-    tv = jnp.sqrt(tv + 1e-8)
+    tv = jnp.abs(d1).sum(axis=(-2, -1)) + jnp.abs(d2).sum(axis=(-2, -1))
 
     if reduction == "max":
         return tv.max()
@@ -121,6 +120,66 @@ def tikhonov(
 @partial(jax.jit, static_argnames=["max_val"])
 def ssim(pred: Float[Array, "*dims"], target: Float[Array, "*dims"], max_val=1.0):
     return dmp_metric(dmp.ssim, pred, target, max_val=max_val)
+
+
+@partial(jax.jit, static_argnames=["sigmas", "filter_size", "C1", "C2", "alpha"])
+def ms_ssim_l1(
+    image1,
+    image2,
+    sigmas=(0.5, 1.0, 2.0, 4.0, 8.0),
+    filter_size=11,
+    C1=0.01,
+    C2=0.03,
+    alpha=0.84,
+):
+    C1 = C1**2
+    C2 = C2**2
+    num_scale = len(sigmas)
+
+    if image1.ndim == 2:
+        image1 = image1[None, ..., None]
+        image2 = image2[None, ..., None]
+    elif image1.ndim == 3:
+        image1 = image1[..., None]
+        image2 = image2[..., None]
+
+
+    diff = jnp.abs(image2 - image1)
+    width = filter_size
+
+    w = jnp.exp(
+        (-1.0 * jnp.arange(-(width // 2), width // 2 + 1) ** 2)[None, :]
+        / (2 * jnp.array(sigmas) ** 2)[:, None]
+    )
+    w = w[:, :, None] @ w[:, None, :]
+    w = w / jnp.sum(w, axis=(1, 2))[:, None, None]
+    w = jnp.reshape(w, (num_scale, 1, width, width))
+    w = jnp.transpose(w, axes=(3, 2, 1, 0))
+
+    w = jnp.transpose(w, [3, 2, 0, 1])
+
+    image1 = jnp.transpose(image1, [0, 3, 1, 2])
+    image2 = jnp.transpose(image2, [0, 3, 1, 2])
+
+    mux = jax.lax.conv(image1, w, (1, 1), "SAME")
+    muy = jax.lax.conv(image2, w, (1, 1), "SAME")
+    sigmax2 = jax.lax.conv(image1**2, w, (1, 1), "SAME") - mux**2
+    sigmay2 = jax.lax.conv(image2**2, w, (1, 1), "SAME") - muy**2
+    sigmaxy = jax.lax.conv(image1 * image2, w, (1, 1), "SAME") - mux * muy
+    l = (2 * mux * muy + C1) / (mux**2 + muy**2 + C1)
+    cs = (2 * sigmaxy + C2) / (sigmax2 + sigmay2 + C2)
+
+    Pcs = jnp.prod(cs, axis=1)
+    l1_loss = jnp.mean(
+        jax.lax.conv(
+            jnp.transpose(diff, [0, 3, 1, 2]),
+            w[-1, :, :, :][None, :, :, :],
+            (1, 1),
+            "SAME",
+        )
+    )
+
+    return alpha * (1 - jnp.mean(l[:, -1, :, :] * Pcs)) + (1 - alpha) * l1_loss
 
 
 @partial(jax.jit, static_argnames=["sigma"])
@@ -196,16 +255,16 @@ def compute_ssim_components(
     structure = (sigma12 + c3) / (sigma1 * sigma2 + c3)
 
     return (
-        luminance.clip(1e-6, 1.0),
-        contrast.clip(1e-6, 1.0),
-        structure.clip(-1.0, 1.0),
+        luminance,
+        contrast,
+        structure,
     )
 
 
 MS_SSIM_SCALES = 5
 
 
-@partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7, 8, 9, 10))
+@partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7, 8, 9))
 def ms_ssim(
     img01: jnp.ndarray,
     img02: jnp.ndarray,
@@ -265,8 +324,10 @@ def ms_ssim(
         if scale < num_scales - 1:
             # Store contrast * structure for all scales except the last
             # Clip values to avoid extreme exponentiation
-            contrast_clipped = jnp.clip(contrast, 1e-6, 1.0)
-            structure_clipped = jnp.clip(structure, -1.0, 1.0)
+            # contrast_clipped = jnp.clip(contrast, 1e-6, 1.0)
+            # structure_clipped = jnp.clip(structure, -1.0, 1.0)
+            contrast_clipped = contrast
+            structure_clipped = structure
             mcs = (contrast_clipped**beta) * (structure_clipped**gamma)
 
             mcs_list.append(jnp.mean(mcs, axis=(-2, -1)).squeeze())
@@ -279,9 +340,13 @@ def ms_ssim(
             min_size = 11
             if img1.shape[-2] < min_size or img1.shape[-1] < min_size:
                 # If we can't process all scales, the last processed scale needs luminance
-                luminance_clipped = jnp.clip(luminance, 1e-6, 1.0)
-                contrast_clipped = jnp.clip(contrast, 1e-6, 1.0)
-                structure_clipped = jnp.clip(structure, -1.0, 1.0)
+                # luminance_clipped = jnp.clip(luminance, 1e-6, 1.0)
+                # contrast_clipped = jnp.clip(contrast, 1e-6, 1.0)
+                # structure_clipped = jnp.clip(structure, -1.0, 1.0)
+
+                luminance_clipped = luminance
+                contrast_clipped = contrast
+                structure_clipped = structure
                 lcs = (
                     (luminance_clipped**alpha)
                     * (contrast_clipped**beta)
@@ -294,9 +359,12 @@ def ms_ssim(
                 break
         else:
             # At coarsest scale (final scale), include luminance
-            luminance_clipped = jnp.clip(luminance, 1e-6, 1.0)
-            contrast_clipped = jnp.clip(contrast, 1e-6, 1.0)
-            structure_clipped = jnp.clip(structure, -1.0, 1.0)
+            # luminance_clipped = jnp.clip(luminance, 1e-6, 1.0)
+            # contrast_clipped = jnp.clip(contrast, 1e-6, 1.0)
+            # structure_clipped = jnp.clip(structure, -1.0, 1.0)
+            luminance_clipped = luminance
+            contrast_clipped = contrast
+            structure_clipped = structure
             lcs = (
                 (luminance_clipped**alpha)
                 * (contrast_clipped**beta)
@@ -371,7 +439,7 @@ def compute_single_mask_penalty(
 
     region_values = txm * mask
 
-    region_size = jnp.sum(mask, axis=(-2, -1))
+    # region_size = jnp.sum(mask, axis=(-2, -1))
 
     below_min_capped = jnp.maximum(0.0, min_val - region_values)
     above_max_capped = jnp.maximum(0.0, region_values - max_val)
@@ -379,7 +447,7 @@ def compute_single_mask_penalty(
     below_min = jnp.where(mask > 0, below_min_capped, 0.0) ** 2
     above_max = jnp.where(mask > 0, above_max_capped, 0.0) ** 2
 
-    region_penalty = jnp.sum(below_min + above_max, axis=(-2, -1)) / region_size
+    region_penalty = jnp.sum(below_min + above_max, axis=(-2, -1)) # / region_size
     return region_penalty
 
 

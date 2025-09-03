@@ -9,7 +9,7 @@ import optax
 from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
 import chest_xray_sim.utils.projections as proj
 from jaxtyping import Array, Float, PyTree
-from wrapper import SegmentationOptimizer
+from chest_xray_sim.inverse.shared_weights_optimizer import SharedWeightsOptimizer
 from chest_xray_sim.inverse import metrics
 from models import ExperimentInputs
 from segmentation_utils import get_priors
@@ -20,7 +20,6 @@ from utils import (
     projection_with_spec,
 )
 from utils.tracking import (
-    ExperimentProtocol,
     build_segmentation_model_inputs,
     load_config,
 )
@@ -48,8 +47,8 @@ args_spec = experiment_args(
 )
 
 
-@dataclass(frozen=True)
-class ExperimentArgs(ExperimentProtocol):
+@dataclass
+class ExperimentArgs:
     lr: float
     n_steps: int
     total_variation: float
@@ -64,6 +63,8 @@ class ExperimentArgs(ExperimentProtocol):
     smooth_metric: typing.Literal["tikonov", "tv"]
     use_band_similarity: bool
     windowing_type: typing.Literal["sigmoid", "linear"]
+    sub_batch_size: int = 32
+    segmentation_th: float = 0.6
 
 
 class ForwardParams(TypedDict):
@@ -76,7 +77,7 @@ class ForwardParams(TypedDict):
 WeightsT = PyTree[ForwardParams]
 
 
-class SegmentationExperiment(SegmentationOptimizer):
+class SegmentationExperiment(SharedWeightsOptimizer):
     hyperparams: ExperimentArgs
 
     projection_fn: Callable[
@@ -91,15 +92,24 @@ class SegmentationExperiment(SegmentationOptimizer):
         inputs: ExperimentInputs,
         hyperparams: ExperimentArgs,
         w0: dict,
-        common_weights: bool = False,
+        common_weights: bool = True,  # Default to True for shared weights
         **args,
     ):
+        # Initialize optimizer
+        optimizer = optax.adam(learning_rate=hyperparams.lr)
+        
         super().__init__(
-            inputs,
-            hyperparams,
+            optimizer=optimizer,
+            constant_weights=hyperparams.constant_weights,
+            n_steps=hyperparams.n_steps,
+            eps=hyperparams.eps,
+            track_time=True,
+            log_interval=100,
             **args,
         )
-
+        
+        self.inputs = inputs
+        self.hyperparams = hyperparams
         self.common_weights = common_weights
         self.w0 = w0
 
@@ -115,14 +125,10 @@ class SegmentationExperiment(SegmentationOptimizer):
 
         self.projection_fn = projection_with_spec(projection_spec)
 
-        weights_ax = jax.tree.map(lambda _: None if self.common_weights else 0, self.w0)
-
+        # For shared weights, we don't vmap over weights dimension
         self.forward_fn = jax.vmap(
             self._forward,
-            in_axes=(
-                0,
-                weights_ax,
-            ),
+            in_axes=(0, None),  # None for shared weights
         )
 
     def _forward(self, txm, weights):
@@ -150,7 +156,7 @@ class SegmentationExperiment(SegmentationOptimizer):
             self.inputs,
             self.hyperparams,
             w0_state=self.w0,
-            common_weights=self.common_weights,
+            common_weights=True,  # Always use shared weights
         )
 
         jax.debug.print("w0: {w0}", w0=w0)
@@ -160,24 +166,34 @@ class SegmentationExperiment(SegmentationOptimizer):
     def project(self, txm, weights, segmentation=None):
         return self.projection_fn(txm, weights)
 
-    def loss_call(self, weights, txm, target):
-        pred = self.forward(txm, weights)
-        loss = self.loss_fn(txm, weights, pred, target, self.segmentation)
-
-        self.log(
-            {
-                "loss": loss.item(),
-            }
+    def loss_call_individual(self, weights, txm, target, segmentation=None):
+        """Loss computation for a single image with shared weights."""
+        # Expand dimensions for single image processing
+        txm_single = txm[jnp.newaxis, ...]
+        target_single = target[jnp.newaxis, ...]
+        seg_single = segmentation[jnp.newaxis, ...] if segmentation is not None else None
+        
+        # Forward pass for single image
+        pred = self.forward(txm_single, weights)
+        
+        # Compute loss for single image
+        loss = self.loss_fn(
+            txm_single, 
+            weights, 
+            pred[0],  # Remove batch dimension
+            target_single[0],  # Remove batch dimension
+            seg_single[0] if seg_single is not None else None  # Remove batch dimension
         )
+        
         return loss
 
     def loss_fn(
         self,
         txm: TransmissionMapT,
         weights: WeightsT,
-        pred: Float[Array, "batch height width"],
-        target: Float[Array, "batch height width"],
-        segmentation: Float[Array, "batch reduced_labels height width"],
+        pred: Float[Array, "height width"],  # Single image
+        target: Float[Array, "height width"],  # Single image
+        segmentation: Float[Array, "reduced_labels height width"] | None = None,  # Single image
     ):
         value_ranges = self.inputs.priors
         tv_factor = self.hyperparams.total_variation
@@ -189,32 +205,35 @@ class SegmentationExperiment(SegmentationOptimizer):
         # l2 loss
         mse_per_image = 0.5 * jnp.mean((pred - target) ** 2)
 
-        # Per-image total variation
-        # Use the metrics module directly to get per-image TV
-        tv_per_image = (
+        # Total variation for single image
+        tv_value = (
             metrics.tikhonov(txm, reduction="mean")
             if self.hyperparams.smooth_metric == "tikonov"
             else metrics.total_variation(txm, reduction="mean")
         )
 
-        seg_penalty_per_image = (
-            metrics.batch_segmentation_sq_penalty(txm, segmentation, value_ranges)
-            .sum(axis=-1)
-            .mean()
-        )
+        # Segmentation penalty for single image
+        if segmentation is not None:
+            seg_penalty = (
+                metrics.batch_segmentation_sq_penalty(txm, segmentation[jnp.newaxis, ...], value_ranges)
+                .sum(axis=-1)
+                .mean()
+            )
+        else:
+            seg_penalty = 0.0
 
         gms = metrics.unsharp_mask_similarity(
             pred, target, sigma=3.0
         ) + metrics.unsharp_mask_similarity(pred, target, sigma=10.0)
 
-        per_image_losses = (
+        loss = (
             mse_per_image
-            + tv_factor * tv_per_image
-            + prior_weight * seg_penalty_per_image
+            + tv_factor * tv_value
+            + prior_weight * seg_penalty
             + gmse_weight * gms * band_similarity
         )
 
-        return per_image_losses
+        return loss
 
 
 def run_processing(
@@ -263,7 +282,19 @@ def run_processing(
         common_weights=True,
         w0=w0,
     )
-    results = exp.run()
+    
+    # Initialize states
+    txm0, w0_shared = exp.init_state()
+    
+    # Run optimization
+    state, _ = exp.optimize(inputs.images, txm0, w0_shared, inputs.segmentations)
+    
+    if state is not None:
+        final_txm, final_weights = state
+        final_pred = exp.forward(final_txm, final_weights)
+        results = (final_txm, final_weights, final_pred, inputs.segmentations)
+    else:
+        results = None
 
     assert results is not None
 
@@ -279,7 +310,7 @@ def run_processing(
     )
 
 
-def sweep_based_exec(dataset, project, sweep_name, desc, tags, sweep_config):
+def sweep_based_exec(dataset, project, tags, sweep_config):
     _ = wandb.login()
 
     _, value_ranges = get_priors(args.cache_dir, collimated_region_bound=0.4)
@@ -391,8 +422,6 @@ if __name__ == "__main__":
     sweep_based_exec(
         dataset,
         PROJECT,
-        SWEEP_NAME,
-        desc="Segmentation-guided optimization with square penalty",
         tags=TAGS,
         sweep_config=config,
     )

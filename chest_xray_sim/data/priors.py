@@ -33,7 +33,7 @@ def extract_region_value_ranges(
     images: Array,
     segmentation: Array,
     regions: list[MaskGroupsT] | MaskGroupsT,
-    threshold: float = 0.6,
+    threshold: float = 0.5,
     collimated_area_bound: float = 0.8,
 ) -> tuple[list[MaskGroupsT], ValueRangeT]:
     """
@@ -62,38 +62,42 @@ def extract_region_value_ranges(
     exclusive_mask_labels, exclusive_masks = batch_get_exclusive_masks(
         segmentation, threshold
     )
-    merged_masks = exclusive_masks.sum(axis=1)
+    # merged_masks = exclusive_masks.sum(axis=1)
 
     # TODO: assumes hard masks (not-None threshold)
-    masked_values = images * merged_masks
-    min_masked_values = masked_values.min(axis=(1, 2))
-    max_masked_values = masked_values.max(axis=(1, 2))
+    # masked_values = images * merged_masks
+    # min_masked_values = masked_values.min(axis=(1, 2), where=masked_values > 0, initial=0.0)
+    # max_masked_values = masked_values.max(axis=(1, 2), where=masked_values > 0, initial=jnp.inf)
 
     for region_id in regions:
         mask = exclusive_masks[:, exclusive_mask_labels.index(region_id)]
 
         min_values = images.min(axis=(1, 2), where=mask > 0, initial=jnp.inf)
         max_values = images.max(axis=(1, 2), where=mask > 0, initial=0.0)
+        
+        ranges = max_values - min_values
+        centers = (max_values + min_values) / 2.0
 
-        # map the values to the range of the merged masks
-        min_values = map_range(
-            min_values,
-            min_masked_values,
-            max_masked_values,
-            0.0,
-            collimated_area_bound,
-        )
-        max_values = map_range(
-            max_values,
-            min_masked_values,
-            max_masked_values,
-            0.0,
-            collimated_area_bound,
-        )
+        target_range = ranges.mean()
+        target_center = centers.mean()
 
-        region_ranges[region_id] = jnp.array(
-            [min_values.mean(), max_values.mean()]
-        )
+        # # map the values to the range of the merged masks
+        # min_values = map_range(
+        #     min_values,
+        #     min_masked_values,
+        #     max_masked_values,
+        #     0.0,
+        #     collimated_area_bound,
+        # )
+        # max_values = map_range(
+        #     max_values,
+        #     min_masked_values,
+        #     max_masked_values,
+        #     0.0,
+        #     collimated_area_bound,
+        # )
+
+        region_ranges[region_id] = target_center + jnp.array([-target_range / 2, target_range / 2])
 
     return (regions, jnp.stack(list(region_ranges.values())))
 

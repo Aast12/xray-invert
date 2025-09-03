@@ -1,6 +1,7 @@
 import argparse
 import functools
 import os
+import pathlib
 from typing import Any, Literal, Tuple
 
 import cv2
@@ -9,6 +10,8 @@ import jax.numpy as jnp
 import joblib
 import numpy as np
 import optax
+import torch
+from chest_xray_sim.data.utils import read_image
 import chest_xray_sim.utils.projections as projections
 from cv2.typing import MatLike
 from chest_xray_sim.inverse.eval import batch_evaluation
@@ -30,6 +33,21 @@ from chest_xray_sim.types import (
 BIT_DTYPES = {8: np.uint8, 16: np.uint16}
 
 
+def dataset_from_files(file_paths, model):
+    images = torch.stack([read_image(fp) for fp in file_paths]).squeeze(0)
+    masks = torch.stack([model(im) for im in images]).squeeze(0)
+    print(images.shape, masks.shape)
+    metas = [
+        ChexpertMeta(
+            abs_img_path=fp,
+            deid_patient_id=pathlib.Path(fp).stem,
+            frontal_lateral="frontal",
+        )
+        for fp in file_paths
+    ]  # Placeholder for metadata
+
+    yield images, masks, metas 
+
 def projection_with_spec(spec):
     def projection_wrapper(
         txm_state: TransmissionMapT,
@@ -47,9 +65,7 @@ def projection_with_spec(spec):
 
         # General constraints
         new_txm_state = optax.projections.projection_hypercube(txm_state)
-        new_weights_state = optax.projections.projection_non_negative(
-            weights_state
-        )
+        new_weights_state = optax.projections.projection_non_negative(weights_state)
 
         # Apply constraints on image processing parameters
         new_weights_state = projections.projection_spec(new_weights_state, spec)
@@ -110,8 +126,9 @@ def batch_forward(single_forward):
 
 
 def chexpert_filenames(meta_batch):
+
     return [
-        f"{m['deid_patient_id']}_{os.path.basename(m['abs_img_path'])}"
+        f"{m['deid_patient_id']}_{os.path.split(os.path.split(m['abs_img_path'])[0])[1]}_{os.path.basename(m['abs_img_path'])}"
         for m in meta_batch
     ]
 
@@ -161,9 +178,7 @@ def save_image(img, path: str, bits=8):
     """save normalized image to file"""
     x = ops.range_normalize(img)
     max_val = 2**bits - 1
-    cv2.imwrite(
-        path, np.array(x * max_val, dtype=np.uint8 if bits == 8 else np.uint16)
-    )
+    cv2.imwrite(path, np.array(x * max_val, dtype=np.uint8 if bits == 8 else np.uint16))
 
 
 def process_results(
@@ -173,6 +188,7 @@ def process_results(
     value_ranges: ValueRangeT,
     results,
     save_dir=None,
+    label=None
 ):
     txm, weights, pred = results
 
@@ -180,34 +196,37 @@ def process_results(
         if not os.path.exists(save_dir):
             os.makedirs(save_dir, exist_ok=True)
 
+        filenames = chexpert_filenames(meta_batch)
+
+        meta_batch_ext = [{**m, "filepath": f} for m, f in zip(meta_batch, filenames)]
+
         # run_save_path = os.path.join(save_dir, run.id)
         # os.makedirs(run_save_path, exist_ok=True)
         joblib.dump(weights, os.path.join(save_dir, "weights.joblib"))
-        joblib.dump(meta_batch, os.path.join(save_dir, "meta.joblib"))
+        joblib.dump(meta_batch_ext, os.path.join(save_dir, "meta.joblib"))
 
-        save_results(
-            save_dir, txm, weights, pred, chexpert_filenames(meta_batch)
-        )
+        save_results(save_dir, txm, weights, pred, filenames)
 
     try:
-        metrics = batch_evaluation(
-            images, txm, pred, segmentations, value_ranges
-        )
+        metrics = batch_evaluation(images, txm, pred, segmentations, value_ranges)
+        prefix = f"{label}_" if label else ""
+
         wandb.log(
             {
-                **wandb_vec_metric("max_violations", metrics.max_violations),
-                **wandb_vec_metric("min_violations", metrics.min_violations),
-                **wandb_vec_metric("compliance", metrics.bound_compliance),
-                **wandb_vec_metric("psnr", metrics.psnr),
-                **wandb_vec_metric("ssim", metrics.ssim),
-                **wandb_vec_metric("ms_ssim", metrics.ms_ssim),
-                **wandb_vec_metric("penalties", metrics.penalties),
-                **wandb_vec_metric("mse", metrics.mse),
-                **wandb_vec_metric("band_similarity", metrics.band_similarity),
-                **wandb_vec_metric("tikhonov", metrics.tikonov),
-                **wandb_vec_metric("total_variation", metrics.total_variation),
+                **wandb_vec_metric(f"{prefix}max_violations", metrics.max_violations),
+                **wandb_vec_metric(f"{prefix}min_violations", metrics.min_violations),
+                **wandb_vec_metric(f"{prefix}compliance", metrics.bound_compliance),
+                **wandb_vec_metric(f"{prefix}psnr", metrics.psnr),
+                **wandb_vec_metric(f"{prefix}ssim", metrics.ssim),
+                **wandb_vec_metric(f"{prefix}ms_ssim_l1", metrics.ms_ssim),
+                **wandb_vec_metric(f"{prefix}penalties", metrics.penalties),
+                **wandb_vec_metric(f"{prefix}mse", metrics.mse),
+                **wandb_vec_metric(f"{prefix}band_similarity", metrics.band_similarity),
+                **wandb_vec_metric(f"{prefix}tikhonov", metrics.tikonov),
+                **wandb_vec_metric(f"{prefix}total_variation", metrics.total_variation),
             }
         )
+
     except Exception as e:
         raise e
         print("Error during batch evaluation:", e)
@@ -236,9 +255,7 @@ def get_random(
     minval, maxval = val_range
     if distribution == "normal":
         arr = jax.random.normal(key, shape=shape)
-        ratio = (arr - arr.min(axis=axis)) / (
-            arr.max(axis=axis) - arr.min(axis=axis)
-        )
+        ratio = (arr - arr.min(axis=axis)) / (arr.max(axis=axis) - arr.min(axis=axis))
         arr = ratio * (maxval - minval) + minval
     else:
         arr = jax.random.uniform(key, minval=minval, maxval=maxval, shape=shape)
@@ -428,9 +445,7 @@ def center_crop_with_aspect_ratio(image, target_size=(512, 512)):
             cropped, target_size + (c,), preserve_range=True, anti_aliasing=True
         )
     else:
-        resized = resize(
-            cropped, target_size, preserve_range=True, anti_aliasing=True
-        )
+        resized = resize(cropped, target_size, preserve_range=True, anti_aliasing=True)
 
     return resized.astype(image.dtype)
 
@@ -448,9 +463,7 @@ def preprocess_chexpert_batch(
     Returns:
         Batch of preprocessed images with consistent dimensions
     """
-    return np.array(
-        [center_crop_with_aspect_ratio(img, target_size) for img in images]
-    )
+    return np.array([center_crop_with_aspect_ratio(img, target_size) for img in images])
 
 
 def cap_resize(img: MatLike, max_dim: int) -> MatLike:
@@ -496,9 +509,7 @@ def log_image(label: str, img, bits=8, logger=wandb.log):
 
 
 def log_run_metrics(run, metrics, prefix):
-    prefixed_metrics = {
-        f"{prefix}{key}": value for key, value in metrics.items()
-    }
+    prefixed_metrics = {f"{prefix}{key}": value for key, value in metrics.items()}
     for key, value in prefixed_metrics.items():
         run.summary[key] = value
 
@@ -533,10 +544,9 @@ def build_optim_runner(w0_builder, operator, loss_fn, **opt_params_high):
 
         operator_params = operator.keys
         missing_params = set(operator_params) - set(w0.keys())
-        assert len(missing_params) == 0, (
-            "Initial weights missing for operator params: "
-            + ", ".join(missing_params)
-        )
+        assert (
+            len(missing_params) == 0
+        ), "Initial weights missing for operator params: " + ", ".join(missing_params)
 
         opt_params = dict_merge(def_opt_params, opt_params_high, opt_params)
 
