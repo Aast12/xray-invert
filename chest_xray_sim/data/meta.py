@@ -18,8 +18,8 @@ class XRayImageMeta(typing.TypedDict):
         ap_pa: if the x-ray image is anterior-posterior (AP) or posterior-anterior (PA)
     """
 
-    img_id: typing.NotRequired[str]
-    local_img_path: typing.NotRequired[str]
+    img_id: str
+    local_img_path: str
     frontal_lateral: typing.NotRequired[str]
     ap_pa: typing.NotRequired[str]
 

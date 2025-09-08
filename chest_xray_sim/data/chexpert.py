@@ -4,11 +4,13 @@ import re
 import typing
 
 import pandas as pd
+import torch
 from torch.utils.data import DataLoader
+from torchvision.transforms import v2
 
 from chest_xray_sim.data.meta import XRayImageMeta
 from chest_xray_sim.data.utils import filter_key, get_chexpert_transform
-from chest_xray_sim.data.dataset import FolderDataset, MetaDataset
+from chest_xray_sim.data.dataset import FolderDataset, Loader, MetaDataset
 from chest_xray_sim.types import ImageTorch
 
 
@@ -25,16 +27,21 @@ class ChexpertMeta(typing.TypedDict):
 
 
 def to_xray_meta(chexpert_meta: ChexpertMeta) -> XRayImageMeta:
-    meta: XRayImageMeta = {
-        "img_id": chexpert_meta.get("deid_patient_id", ""),
-        "local_img_path": chexpert_meta.get("abs_img_path", ""),
-    }
-    if "frontal_lateral" in chexpert_meta:
-        meta["frontal_lateral"] = chexpert_meta["frontal_lateral"]
-    if "ap_pa" in chexpert_meta:
-        meta["ap_pa"] = chexpert_meta["ap_pa"]
+    try: 
+        meta: XRayImageMeta = {
+            "img_id": chexpert_meta["deid_patient_id"],
+            "local_img_path": chexpert_meta["abs_img_path"],
+        }
 
-    return meta
+        if "frontal_lateral" in chexpert_meta:
+            meta["frontal_lateral"] = chexpert_meta["frontal_lateral"]
+        if "ap_pa" in chexpert_meta:
+            meta["ap_pa"] = chexpert_meta["ap_pa"]
+
+        return meta
+    except KeyError:
+        raise ValueError("ChexpertMeta must contain deid_patient_id and abs_img_path")
+
 
 
 class ChexpertDataset(MetaDataset):
@@ -88,18 +95,12 @@ class ChexpertDataset(MetaDataset):
 
     def get_meta_data(self, abs_path: str) -> XRayImageMeta:
         item = self.metadata[self.metadata["abs_img_path"] == abs_path].head(1)
+        item_contents = item.iloc[0].to_dict() if not item.empty else {}
 
-        return (
-            to_xray_meta(ChexpertMeta(**item.iloc[0].to_dict()))
-            if not item.empty
-            else {}
-        )
+        return to_xray_meta(ChexpertMeta(**item_contents))
 
 
-class ChexpertMetaLoader:
-    iterator = None
-    lodaer: DataLoader
-
+class ChexpertMetaLoader(Loader):
     def __init__(
         self,
         data_dir: str,
@@ -107,80 +108,35 @@ class ChexpertMetaLoader:
         split: typing.Literal["train", "valid"] | None = None,
         frontal_lateral: typing.Literal["Frontal", "Lateral"] | None = "Frontal",
         batch_size: int = 12,
+        image_size=512,
+        dtype=torch.float32,
+        dataset_kwargs={},
         **kwargs,
     ):
-        self.ds = ChexpertDataset(
-            root=data_dir,
-            split=split,
-            meta_dir=meta_dir,
-            frontal_lateral=frontal_lateral,
-            transform=get_chexpert_transform(512),
-            **kwargs,
-        )
-        self.loader = DataLoader(
-            self.ds,
+        super().__init__(
+            dataset=ChexpertDataset(
+                root=data_dir,
+                split=split,
+                meta_dir=meta_dir,
+                frontal_lateral=frontal_lateral,
+                transform=self.get_transform(image_size, dtype),
+                **dataset_kwargs,
+            ),
             batch_size=batch_size,
             shuffle=True,
             collate_fn=ChexpertDataset.collate,
         )
 
-    def next(self) -> tuple[ImageTorch, list[XRayImageMeta]]:
-        if self.iterator is None:
-            self.iterator = iter(self.loader)
-        try:
-            batch = next(self.iterator)
-        except StopIteration:
-            self.iterator = iter(self.loader)
-            batch = next(self.iterator)
-        return batch
-
-
-def get_chexpert_dataset(
-    data_dir: str,
-    meta_dir: str,
-    split: typing.Literal["train", "valid"] | None = None,
-    frontal_lateral: typing.Literal["Frontal", "Lateral"] | None = "Frontal",
-    batch_size: int = 12,
-    image_size: int = 512,
-    **kwargs,
-):
-    ds = ChexpertDataset(
-        root=data_dir,
-        split=split,
-        meta_dir=meta_dir,
-        frontal_lateral=frontal_lateral,
-        transform=get_chexpert_transform(image_size),
-        **kwargs,
-    )
-
-    ds_loader = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=ChexpertDataset.collate,
-    )
-    return ds_loader
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    images = get_chexpert_dataset(
-        data_dir="/Volumes/T7/datasets/chexpert_plus/PNG/PNG/",
-        split="train",
-        meta_dir="/Volumes/T7/datasets/chexpert_plus/df_chexpert_plus_240401.csv",
-        frontal_lateral="Frontal",
-    )
-    batch = next(iter(images))
-
-    img, meta = batch
-    path = [meta[i]["abs_img_path"] for i in range(len(meta))]
-
-    fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-
-    for i in range(3):
-        ax[i].imshow(img[i][0])
-        ax[i].set_title(f"Path: {path[i]}")
-        ax[i].axis("off")
-
-    plt.show()
+    @classmethod
+    def get_transform(
+        cls, size: int = 512, dtype: torch.dtype = torch.float32
+    ) -> v2.Compose:
+        return v2.Compose(
+            [
+                v2.Grayscale(),
+                v2.PILToTensor(),
+                v2.Resize(size),
+                v2.CenterCrop(size),
+                v2.ToDtype(dtype, scale=True),
+            ]
+        )

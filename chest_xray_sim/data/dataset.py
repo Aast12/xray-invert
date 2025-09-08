@@ -1,10 +1,13 @@
-from jaxtyping import Float
 import pandas as pd
 import torch
-import os
+from torch.utils.data import Dataset, DataLoader
 import torchvision
 
-from chest_xray_sim.data.meta import XRayImageMeta, default_get_metadata_from_df, default_get_metadata_from_path
+from chest_xray_sim.data.meta import (
+    XRayImageMeta,
+    default_get_metadata_from_df,
+    default_get_metadata_from_path,
+)
 from chest_xray_sim.types import ImageTorch
 
 
@@ -112,12 +115,40 @@ class MetaDataset(FolderDataset):
         self.metadata = pd.read_csv(meta_dir)
         self.metadata = self.filter_records(self.metadata)
 
-        super().__init__(
-            root=root, extensions=None, **kwargs
-        )
+        super().__init__(root=root, extensions=None, **kwargs)
 
     def filter_records(self, df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     def get_meta_data(self, abs_path: str) -> XRayImageMeta:
         return default_get_metadata_from_df(self.metadata, abs_path)
+
+
+class Loader:
+    iterator = None
+    loader: DataLoader
+    dataset: torch.utils.data.Dataset
+
+    def __init__(
+        self,
+        dataset,
+        batch_size,
+        shuffle=True,
+        **kwargs,
+    ):
+        self.dataset = dataset
+        self.loader = DataLoader(
+            self.dataset, batch_size=batch_size, shuffle=shuffle, **kwargs
+        )
+
+    def next(self) -> tuple[ImageTorch, list[XRayImageMeta]]:
+        if self.iterator is None:
+            self.iterator = iter(self.loader)
+
+        return next(self.iterator)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.next()

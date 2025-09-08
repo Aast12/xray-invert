@@ -7,6 +7,7 @@ from jaxtyping import Array, Float, Integer
 from torch import Tensor
 from torchvision.transforms import v2
 from torchxrayvision.baseline_models.chestx_det import PSPNet
+from chest_xray_sim.data.chexpert import ChexpertMetaLoader
 from chest_xray_sim.types import ArrayT
 
 from chest_xray_sim.segmentation.model import (
@@ -301,7 +302,6 @@ if __name__ == "__main__":
 
     import matplotlib.pyplot as plt
 
-    from chest_xray_sim.data.chexpert import get_chexpert_dataset
     from chest_xray_sim.data.utils import read_image
     from chest_xray_sim.segmentation.model import ChestSegmentation
 
@@ -332,13 +332,16 @@ if __name__ == "__main__":
 
     print("base_seg shape:", base_seg.shape)
 
-    images = get_chexpert_dataset(
+    images = ChexpertMetaLoader( 
         data_dir="/Volumes/T7/datasets/chexpert_plus/PNG/PNG/",
         split="train",
         meta_dir="/Volumes/T7/datasets/chexpert_plus/df_chexpert_plus_240401.csv",
         frontal_lateral="Frontal",
         batch_size=15,
     )
+
+    batch = images.next()
+
     batch = next(iter(images))
 
     img, meta = batch
