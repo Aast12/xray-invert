@@ -1,6 +1,4 @@
-import typing
-from typing import get_args, overload
-
+from typing import overload
 import jax
 import jax.numpy as jnp
 import torch
@@ -9,25 +7,14 @@ from jaxtyping import Array, Float, Integer
 from torch import Tensor
 from torchvision.transforms import v2
 from torchxrayvision.baseline_models.chestx_det import PSPNet
+from chest_xray_sim.types import ArrayT
 
-ArrayT = typing.Union[Array, Tensor]
-
-SegmentationLabelsT = typing.Literal[
-    "Left Clavicle",
-    "Right Clavicle",
-    "Left Scapula",
-    "Right Scapula",
-    "Left Lung",
-    "Right Lung",
-    "Left Hilus Pulmonis",
-    "Right Hilus Pulmonis",
-    "Heart",
-    "Aorta",
-    "Facies Diaphragmatica",
-    "Mediastinum",
-    "Weasand",
-    "Spine",
-]
+from chest_xray_sim.segmentation.model import (
+    MASK_GROUPS,
+    MASK_GROUPS_LABELS,
+    SEGMENTATION_LABELS,
+    MaskGroupsT,
+)
 
 bone_labels = [
     "Left Clavicle",
@@ -53,25 +40,42 @@ soft_labels = [
 ]
 
 
-# ORDER MATTERS! see get_exclusive_masks
-MaskGroupsT = typing.Literal["lung", "soft", "bone"]
-MASK_GROUPS: tuple[MaskGroupsT, ...] = get_args(MaskGroupsT)
-
-MASK_GROUPS_LABELS: dict[MaskGroupsT, list[str]] = {
-    "bone": bone_labels,
-    "lung": lung_labels,
-    "soft": soft_labels,
-}
-
-
+@overload
+def mask_threshold(
+    pred: Float[Array, "*batch height width"],
+    threshold: float,
+) -> Integer[Array, "*batch height width"]: ...
+@overload
 def mask_threshold(
     pred: Float[Tensor, "*batch height width"],
     threshold: float,
-) -> Integer[Tensor, "*batch height width"]:
-    mask = pred.clone()
-    mask[mask >= threshold] = 1
-    mask[mask < threshold] = 0
-    return mask.int()
+) -> Integer[Tensor, "*batch height width"]: ...
+def mask_threshold(
+    pred,
+    threshold,
+):
+    """
+    Returns a (integer) binary mask by thresholding a prediction tensor.
+
+    Args:
+        pred: The prediction tensor.
+        threshold: The threshold to discretize the mask (confidence to binary).
+
+    Returns:
+        The binary mask.
+    """
+    if isinstance(pred, Array):
+        mask = pred.copy()
+        mask = jnp.where(mask >= threshold, 1, 0)
+        return mask.astype(jnp.int8)
+
+    if isinstance(pred, Tensor):
+        mask = pred.clone()
+        mask[mask >= threshold] = 1
+        mask[mask < threshold] = 0
+        return mask.int()
+
+    raise ValueError(f"Unsupported type {type(pred)}. Expected Array or Tensor.")
 
 
 @overload
@@ -90,19 +94,21 @@ def substract_mask(
 ):
     if isinstance(mask0, Array):
         return jnp.bitwise_xor(mask0, mask0 * exclude_mask)
+    if isinstance(mask0, Tensor):
+        return torch.bitwise_xor(mask0, mask0 * exclude_mask)
 
-    return torch.bitwise_xor(mask0, mask0 * exclude_mask)
+    raise ValueError(f"Unsupported type {type(mask0)}. Expected Array or Tensor.")
 
 
 @overload
 def _join_masks(
     pred: Float[Array, "num_classes height width"],
-    threshold: float | None = None,
+    threshold: float | None,
 ) -> Float[Array, "height width"]: ...
 @overload
 def _join_masks(
     pred: Float[Tensor, "num_classes height width"],
-    threshold: float | None = None,
+    threshold: float | None,
 ) -> Float[Tensor, "height width"]: ...
 def _join_masks(
     pred,
@@ -165,48 +171,7 @@ def _batch_join_masks(
             # TODO: verify
             return aggregated.sum(dim=1, keepdim=True).clip(0, 1)
 
-    raise ValueError(
-        f"Unsupported type {type(pred)}. Expected Array or Tensor."
-    )
-
-
-class ChestSegmentation(xrv.baseline_models.chestx_det.PSPNet):
-    # Assumes input images are in the range [0, 1]
-    preprocess = v2.Lambda(lambda x: (2 * x - 1.0) * 1024)
-
-    targets_dict: dict[str, int] = {
-        PSPNet.targets[i]: i for i in range(len(PSPNet.targets))
-    }
-
-    def __init__(self, cache_dir: str | None = None):
-        kwargs = {} if cache_dir is None else {"cache_dir": cache_dir}
-        super(ChestSegmentation, self).__init__(**kwargs)
-
-    def forward(self, x):
-        return super(ChestSegmentation, self).forward(
-            ChestSegmentation.preprocess(x)
-        )
-
-    def __call__(self, x):
-        with torch.inference_mode():
-            return super(ChestSegmentation, self).__call__(x)
-
-    @classmethod
-    def get_mask(
-        cls,
-        pred: torch.Tensor | Array,
-        label: SegmentationLabelsT,
-        threshold: float | None = None,
-    ) -> torch.Tensor | Array:
-        if threshold is not None:
-            if isinstance(pred, Array):
-                pred = jnp.where(jax.nn.sigmoid(pred) < threshold, 0, 1)
-            else:
-                pred = torch.where(torch.sigmoid(pred) < threshold, 0, 1)
-
-        if isinstance(pred, Array):
-            return pred[jnp.array(cls.targets_dict[label])]
-        return pred[cls.targets_dict[label]]
+    raise ValueError(f"Unsupported type {type(pred)}. Expected Array or Tensor.")
 
 
 # TODO: refactor get_group_mask and batched versin
@@ -237,7 +202,7 @@ def get_group_mask(
     """
     labels = MASK_GROUPS_LABELS[group]
 
-    q = [ChestSegmentation.targets_dict[label] for label in labels]
+    q = [SEGMENTATION_LABELS[label] for label in labels]
     if isinstance(pred, Array):
         q = jnp.array(q)
 
@@ -274,7 +239,7 @@ def batched_get_group_mask(
     """
     labels = MASK_GROUPS_LABELS[group]
 
-    q = [ChestSegmentation.targets_dict[label] for label in labels]
+    q = [[label] for label in labels]
     if isinstance(pred, Array):
         q = jnp.array(q)
 
@@ -287,14 +252,11 @@ def batched_get_group_mask(
 def batch_get_exclusive_masks(
     pred: Float[Array, "batch labels height width"],
     threshold: float | None = None,
-) -> tuple[
-    list[MaskGroupsT], Float[Array, "batch reduced_labels height width"]
-]:
+) -> tuple[list[MaskGroupsT], Float[Array, "batch reduced_labels height width"]]:
     ordered_groups = MASK_GROUPS
     # TODO: rewrite for group of masks?
     complete_masks = [
-        batched_get_group_mask(pred, group, threshold)
-        for group in ordered_groups
+        batched_get_group_mask(pred, group, threshold) for group in ordered_groups
     ]
 
     complete_masks = jnp.concat(complete_masks, axis=1).astype(jnp.int8)
@@ -321,9 +283,7 @@ def get_exclusive_masks(
     threshold: float | None = None,
 ) -> dict[MaskGroupsT, Array]:
     print("getting exclusive masks", pred.shape)
-    complete_masks = [
-        get_group_mask(pred, group, threshold) for group in MASK_GROUPS
-    ]
+    complete_masks = [get_group_mask(pred, group, threshold) for group in MASK_GROUPS]
 
     exclusive_masks = []
     for i, mask in enumerate(complete_masks):
@@ -333,9 +293,7 @@ def get_exclusive_masks(
 
         exclusive_masks.append(exclusive_mask)
 
-    return {
-        group_id: mask for group_id, mask in zip(MASK_GROUPS, exclusive_masks)
-    }
+    return {group_id: mask for group_id, mask in zip(MASK_GROUPS, exclusive_masks)}
 
 
 if __name__ == "__main__":
@@ -343,8 +301,9 @@ if __name__ == "__main__":
 
     import matplotlib.pyplot as plt
 
-    from chest_xray_sim.data.chexpert_dataset import get_chexpert_dataset
+    from chest_xray_sim.data.chexpert import get_chexpert_dataset
     from chest_xray_sim.data.utils import read_image
+    from chest_xray_sim.segmentation.model import ChestSegmentation
 
     model_path = "/Volumes/T7/datasets/torchxrayvision"
     samples = [

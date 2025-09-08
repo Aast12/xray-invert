@@ -42,6 +42,9 @@ dev = [
     "ipykernel>=6.29.5",
     "nbdime>=4.0.2",
     "pandas-stubs>=2.2.3.250308",
+    "pytest>=8.4.2",
+    "pytest-cov>=6.3.0",
 ]
+
 
 

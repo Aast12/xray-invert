@@ -4,15 +4,15 @@ import typing
 import torch
 from torch.utils.data import DataLoader
 
-from chest_xray_sim.data.chexpert_dataset import ChexpertDataset, ChexpertMeta
-from chest_xray_sim.data.segmentation import (
+from chest_xray_sim.data.chexpert import FolderDataset, ChexpertMeta
+from chest_xray_sim.segmentation import (
     ChestSegmentation,
     get_group_mask,
 )
 from chest_xray_sim.data.utils import get_chexpert_transform
 
 
-class SegmentationChexpertDataset(ChexpertDataset):
+class SegmentationChexpertDataset(FolderDataset):
     """Dataset that yields both Chexpert images and their segmentation masks."""
 
     def __init__(
@@ -26,21 +26,6 @@ class SegmentationChexpertDataset(ChexpertDataset):
         cache_dir: str | None = None,
         **kwargs: typing.Any,
     ):
-        """
-
-        Mask cache directory assumes and uses the same file structure as the image directory.
-
-                Args:
-                    root (str): Path to the dataset root directory.
-                    meta_dir (str): Path to the metadata CSV file.
-                    mask_dir (str | None): Directory with precomputed masks. If None, masks will be computed on-the-fly.
-                    split (str | None): Dataset split ('train' or 'valid').
-                    frontal_lateral (str | None): Filter for frontal or lateral images.
-                    cache_dir (str | None): Directory for caching segmentation model data (default: ~/.torchxrayvision/).
-        .
-                    **kwargs: Additional arguments for ChexpertDataset.
-        """
-
         super(SegmentationChexpertDataset, self).__init__(
             root=root,
             meta_dir=meta_dir,
@@ -72,9 +57,7 @@ class SegmentationChexpertDataset(ChexpertDataset):
             return torch.load(mask_path)
 
         pred = self.seg_model(image)[0]
-        assert pred.ndim == 3, (
-            f"Segmentation model returned {pred.ndim}D tensor."
-        )
+        assert pred.ndim == 3, f"Segmentation model returned {pred.ndim}D tensor."
 
         if mask_path:
             os.makedirs(os.path.dirname(mask_path), exist_ok=True)

@@ -7,9 +7,9 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float, PyTree
 
-WeightsT = PyTree
-BatchT = Float[Array, "batch rows cols"]
-SegmentationT = Float[Array, "batch labels rows cols"]
+from ..types import WeightsT, BatchT, SegmentationT
+
+
 OptimizationRetT = Union[
     tuple[tuple[PyTree, PyTree], list[float]], tuple[None, list[float]]
 ]
@@ -21,14 +21,10 @@ class Optimizer(ABC):
     This class provides optimization functionality for recovering
     transmission maps and model parameters from images, with optional
     segmentation information.
-    
-    Available extensions:
-    - AdaptiveOptimizer: Per-image gradient stopping for all parameters
-    - SelectiveFreezeOptimizer: Freezes only transmission maps while preserving weights
     """
 
     segmentation: Optional[SegmentationT] = None
-    step = 0 
+    step = 0
     losses: list[float] = []
 
     def __init__(
@@ -146,7 +142,7 @@ class Optimizer(ABC):
         self.segmentation = segmentation
 
         def loss_call(weights, tx_maps, target):
-            return self.loss_call(weights, tx_maps, target) 
+            return self.loss_call(weights, tx_maps, target)
 
         # Initialize state
         state = (txm0, w0)
@@ -192,17 +188,13 @@ class Optimizer(ABC):
             txm_new_state = optax.apply_updates(tx_maps, updates_txm)
             weights_new_state = weights
             if not self.constant_weights:
-                weights_new_state = optax.apply_updates(
-                    weights, updates_weights
-                )
+                weights_new_state = optax.apply_updates(weights, updates_weights)
 
             # Create new state
             new_state = (txm_new_state, weights_new_state)
 
             # Apply projections
-            new_state = self.project(
-                txm_new_state, weights_new_state, segmentation
-            )
+            new_state = self.project(txm_new_state, weights_new_state, segmentation)
 
             # Handle NaN loss
             if jnp.isnan(loss):
@@ -225,9 +217,7 @@ class Optimizer(ABC):
                 if self.track_time:
                     loop_time = (time.time() - long_step) / 60
                     log_info["mins_per_interval"] = loop_time
-                    print(
-                        f"\nStep {step}, Loss: {loss:.6f} ({loop_time:.2f} mins)"
-                    )
+                    print(f"\nStep {step}, Loss: {loss:.6f} ({loop_time:.2f} mins)")
                     long_step = time.time()
                 else:
                     print(f"\nStep {step}, Loss: {loss:.6f}")
@@ -243,11 +233,7 @@ class Optimizer(ABC):
 
         # Log time metrics
         if self.track_time:
-            self.summary(
-                {
-                    "it_time": it_times
-                }
-            )
+            self.summary({"it_time": it_times})
 
         if state is None:
             return None, self.losses

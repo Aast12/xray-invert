@@ -1,12 +1,11 @@
 """Prior computation utilities for transmission map recovery."""
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
 from jaxtyping import Array
 
-from chest_xray_sim.data.segmentation import (
+from chest_xray_sim.segmentation import (
     MASK_GROUPS,
     ChestSegmentation,
     MaskGroupsT,
@@ -74,7 +73,7 @@ def extract_region_value_ranges(
 
         min_values = images.min(axis=(1, 2), where=mask > 0, initial=jnp.inf)
         max_values = images.max(axis=(1, 2), where=mask > 0, initial=0.0)
-        
+
         ranges = max_values - min_values
         centers = (max_values + min_values) / 2.0
 
@@ -97,7 +96,9 @@ def extract_region_value_ranges(
         #     collimated_area_bound,
         # )
 
-        region_ranges[region_id] = target_center + jnp.array([-target_range / 2, target_range / 2])
+        region_ranges[region_id] = target_center + jnp.array(
+            [-target_range / 2, target_range / 2]
+        )
 
     return (regions, jnp.stack(list(region_ranges.values())))
 
@@ -106,8 +107,8 @@ def get_priors(
     segmentation_cache_dir: str,
     as_numpy: bool = False,
     collimated_region_bound: float = 0.4,
-    real_tm_paths: list[str] = None,
-    fwd_img_paths: list[str] = None,
+    real_tm_paths: list[str] | None = None,
+    fwd_img_paths: list[str] | None = None,
 ) -> tuple[list[MaskGroupsT], ValueRangeT]:
     """Get priors for segmentation model.
 
@@ -130,7 +131,7 @@ def get_priors(
         fwd_img_paths = [
             "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
         ]
-    
+
     segmentation_model = ChestSegmentation(cache_dir=segmentation_cache_dir)
 
     real_tm_data = torch.stack([read_image(path) for path in real_tm_paths])
@@ -154,3 +155,4 @@ def get_priors(
         return seg_labels, np.array(value_ranges)
 
     return seg_labels, value_ranges
+
