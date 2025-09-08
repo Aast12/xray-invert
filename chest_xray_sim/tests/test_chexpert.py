@@ -17,7 +17,6 @@ import numpy as np
 # Import the actual modules being tested
 from chest_xray_sim.data.chexpert import (
     ChexpertDataset,
-    ChexpertFolderDataset,
     ChexpertMetaLoader,
     get_chexpert_dataset,
     to_xray_meta,
@@ -63,7 +62,6 @@ class TestChexpertDataset:
                 assert meta_root_dir == "/fake/path/train"
                 assert meta_meta_dir == "/fake/meta.csv"
                 assert meta_kwargs["image_size"] == 128
-
 
     def test_is_valid_file_method(self):
         """Test is_valid_file method logic."""
@@ -122,108 +120,6 @@ class TestChexpertDataset:
 
         meta = dataset.get_meta_data("/non/existent/path.png")
         assert meta == {}
-
-
-class TestChexpertFolderDatasetIssues:
-    """Test cases documenting issues with ChexpertFolderDataset class."""
-
-    def test_constructor_parameter_passing(self):
-        """Test that ChexpertFolderDataset passes parameters correctly."""
-        with patch("chest_xray_sim.data.dataset.FolderDataset.__init__") as mock_init:
-            mock_init.return_value = None
-
-            dataset = ChexpertFolderDataset(
-                root="/fake/path", meta_dir="/fake/meta.csv", split="train"
-            )
-
-            # Verify the parameters were passed correctly
-            mock_init.assert_called_once()
-            call_args = mock_init.call_args
-            assert call_args[1]["root"] == "/fake/path"
-            assert call_args[1]["meta_dir"] == "/fake/meta.csv"
-
-    def test_get_meta_data_numeric_id(self):
-        """Test get_meta_data with numeric ID pattern."""
-        # Test that ChexpertFolderDataset can extract metadata from filenames
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create a dummy image directory structure
-            img_dir = os.path.join(temp_dir, "train")
-            os.makedirs(img_dir, exist_ok=True)
-            os.makedirs(os.path.join(img_dir, "dummy_class"), exist_ok=True)
-
-            # Create a dummy image file with proper naming pattern
-            dummy_img_path = os.path.join(img_dir, "dummy_class", "12345_frontal.jpg")
-            with open(dummy_img_path, "w") as f:
-                f.write("dummy image content")
-
-            # Create the dataset - need to avoid the parameter passing issue
-            # by not passing split and frontal_lateral to the constructor
-            dataset = ChexpertFolderDataset(root=img_dir)
-
-            # Test that it can extract metadata from filename
-            meta = dataset.get_meta_data(dummy_img_path)
-
-            assert isinstance(meta, dict)
-            # Should extract patient ID and other info from filename
-            print(f"Extracted metadata: {meta}")
-            # The actual implementation should extract patient ID from filename
-            assert "deid_patient_id" in meta or "patient_id" in meta
-
-    def test_get_meta_data_patient_pattern(self):
-        """Test get_meta_data with patient{id} pattern."""
-        # Test that ChexpertFolderDataset can extract metadata from filenames
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create a dummy image directory structure
-            img_dir = os.path.join(temp_dir, "train")
-            os.makedirs(img_dir, exist_ok=True)
-            os.makedirs(os.path.join(img_dir, "dummy_class"), exist_ok=True)
-
-            # Create a dummy image file with patient ID pattern
-            dummy_img_path = os.path.join(
-                img_dir, "dummy_class", "patient12345_frontal.jpg"
-            )
-            with open(dummy_img_path, "w") as f:
-                f.write("dummy image content")
-
-            # Create the dataset - need to avoid the parameter passing issue
-            # by not passing split and frontal_lateral to the constructor
-            dataset = ChexpertFolderDataset(root=img_dir)
-
-            # Test that it can extract metadata from filename
-            meta = dataset.get_meta_data(dummy_img_path)
-
-            assert isinstance(meta, dict)
-            # Should extract patient ID and other info from filename
-            print(f"Extracted metadata: {meta}")
-            # The actual implementation should extract patient ID from filename
-            assert "deid_patient_id" in meta or "patient_id" in meta
-
-    def test_get_meta_data_ap_pa_extraction(self):
-        """Test AP/PA extraction from filename."""
-        # Test that ChexpertFolderDataset can extract metadata from filenames
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create a dummy image directory structure
-            img_dir = os.path.join(temp_dir, "train")
-            os.makedirs(img_dir, exist_ok=True)
-            os.makedirs(os.path.join(img_dir, "dummy_class"), exist_ok=True)
-
-            # Create a dummy image file with PA in filename
-            dummy_img_path = os.path.join(img_dir, "dummy_class", "12345_pa.jpg")
-            with open(dummy_img_path, "w") as f:
-                f.write("dummy image content")
-
-            # Create the dataset - need to avoid the parameter passing issue
-            # by not passing split and frontal_lateral to the constructor
-            dataset = ChexpertFolderDataset(root=img_dir)
-
-            # Test that it can extract metadata from filename
-            meta = dataset.get_meta_data(dummy_img_path)
-
-            assert isinstance(meta, dict)
-            # Should extract patient ID and AP/PA info from filename
-            print(f"Extracted metadata: {meta}")
-            # The actual implementation should extract AP/PA from filename
-            assert "ap_pa" in meta or "pa" in meta
 
 
 class TestChexpertMetaLoaderIssues:

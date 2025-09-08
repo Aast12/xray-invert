@@ -61,8 +61,14 @@ class ChexpertDataset(MetaDataset):
         if self.frontal_lateral is None and self.split is None:
             return True
 
-        view_check = self.frontal_lateral.lower() in path.lower() if self.frontal_lateral is not None else True
-        split_check = self.split.lower() in path.lower() if self.split is not None else True
+        view_check = (
+            self.frontal_lateral.lower() in path.lower()
+            if self.frontal_lateral is not None
+            else True
+        )
+        split_check = (
+            self.split.lower() in path.lower() if self.split is not None else True
+        )
 
         return view_check and split_check
 
@@ -83,69 +89,11 @@ class ChexpertDataset(MetaDataset):
     def get_meta_data(self, abs_path: str) -> XRayImageMeta:
         item = self.metadata[self.metadata["abs_img_path"] == abs_path].head(1)
 
-        return to_xray_meta(item.iloc[0].to_dict()) if not item.empty else {}
-
-
-class ChexpertFolderDataset(FolderDataset):
-    """Dataset for CheXpert images with custom filename parsing.
-
-    This implementation assumes CheXpert filenames follow patterns like:
-    - patient{id}_frontal.png
-    - patient{id}_lateral.png
-    - patient{id}_view{view}_frontal.png
-    - CheXpert-v1.0/train/patient{id}/study{study}/view{view}_frontal.png
-    """
-
-    def __init__(
-        self,
-        *args,
-        **kwargs,
-    ):
-        super(ChexpertFolderDataset, self).__init__(*args, **kwargs)
-
-    def get_meta_data(self, filepath: str) -> ChexpertMeta:
-        """Extract CheXpert metadata from filename using common patterns."""
-        filename = os.path.basename(filepath)
-        full_path = Path(filepath)
-
-        meta: ChexpertMeta = {
-            "abs_img_path": filepath,
-            "deid_patient_id": "unknown",
-        }
-
-        # Try to extract patient ID from various patterns
-        # Pattern 1: patient{id}_
-        patient_match = re.search(r"patient(\d+)", str(full_path))
-        if patient_match:
-            meta["deid_patient_id"] = f"patient{patient_match.group(1)}"
-
-        # Pattern 2: Just a numeric ID at the start
-        id_match = re.match(r"^(\d+)_", filename)
-        if id_match and meta["deid_patient_id"] == "unknown":
-            meta["deid_patient_id"] = id_match.group(1)
-
-        # Extract view information
-        filename_lower = filename.lower()
-        if "frontal" in filename_lower:
-            meta["frontal_lateral"] = "Frontal"
-        elif "lateral" in filename_lower:
-            meta["frontal_lateral"] = "Lateral"
-
-        # Extract AP/PA information
-        if (
-            "_ap_" in filename_lower
-            or "_ap." in filename_lower
-            or "ap_" in filename_lower
-        ):
-            meta["ap_pa"] = "AP"
-        elif (
-            "_pa_" in filename_lower
-            or "_pa." in filename_lower
-            or "pa_" in filename_lower
-        ):
-            meta["ap_pa"] = "PA"
-
-        return meta
+        return (
+            to_xray_meta(ChexpertMeta(**item.iloc[0].to_dict()))
+            if not item.empty
+            else {}
+        )
 
 
 class ChexpertMetaLoader:
