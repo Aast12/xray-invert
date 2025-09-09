@@ -1,5 +1,3 @@
-import os
-import tempfile
 import pandas as pd
 import pytest
 from unittest.mock import patch
@@ -47,11 +45,9 @@ class TestChexpertDataset:
 
                 call_args = mock_meta_init.call_args
                 meta_root_dir, meta_meta_dir = call_args[0]
-                meta_kwargs = call_args[1]
 
                 assert meta_root_dir == "/fake/path/train"
                 assert meta_meta_dir == "/fake/meta.csv"
-                assert meta_kwargs["image_size"] == 128
 
     def test_is_valid_file_method(self):
         """Test is_valid_file method logic."""
@@ -114,6 +110,7 @@ class TestChexpertDataset:
         assert "ChexpertMeta must contain deid_patient_id and abs_img_path" in str(
             exc_info.value
         )
+
 
 class TestChexpertMetaLoader:
     """Test cases documenting issues with ChexpertMetaLoader class."""

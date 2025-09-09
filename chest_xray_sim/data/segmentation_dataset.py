@@ -2,35 +2,42 @@ import os
 import typing
 
 import torch
-from torch.utils.data import DataLoader
 
-from chest_xray_sim.data.chexpert import FolderDataset, ChexpertMeta
-from chest_xray_sim.segmentation import (
+from chest_xray_sim.data.chexpert import ChexpertDataset
+from chest_xray_sim.segmentation.model import (
     ChestSegmentation,
-    get_group_mask,
 )
-from chest_xray_sim.data.utils import get_chexpert_transform
 
 
-class SegmentationChexpertDataset(FolderDataset):
-    """Dataset that yields both Chexpert images and their segmentation masks."""
+class SegmentationChexpertDataset(ChexpertDataset):
+    """
+    Dataset that yields both Chexpert images and their segmentation masks.
+    """
 
     def __init__(
         self,
         root: str,
         meta_dir: str,
         mask_dir: str | None = None,
-        compute_masks: bool = False,
-        split: typing.Literal["train", "valid"] | None = None,
-        frontal_lateral: typing.Literal["Frontal", "Lateral"] | None = None,
         cache_dir: str | None = None,
         **kwargs: typing.Any,
     ):
-        super(SegmentationChexpertDataset, self).__init__(
+        """
+        Initialize the SegmentationChexpertDataset.
+
+        This dataset yields tuples of (image, segmentation, metadata).
+
+
+        Args:
+            root: Root directory of the dataset.
+            meta_dir: Path to the chexpert metadata file.
+            mask_dir: Path to the directory to cache the segmentation masks.
+            cache_dir: Path to the ChestXDet model.
+            **kwargs: Additional arguments to pass to ChexpertDataset
+        """
+        super().__init__(
             root=root,
             meta_dir=meta_dir,
-            split=split,
-            frontal_lateral=frontal_lateral,
             **kwargs,
         )
 
@@ -65,12 +72,9 @@ class SegmentationChexpertDataset(FolderDataset):
 
         return pred
 
-    def __getitem__(
-        self, index: int
-    ) -> tuple[torch.Tensor, torch.Tensor, ChexpertMeta]:
-        # Get original data from parent class
+    def __getitem__(self, index: int):
         img, meta = super(SegmentationChexpertDataset, self).__getitem__(index)
-        img_path = meta.get("abs_img_path")
+        img_path = meta["local_img_path"]
 
         return img, self._get_segmentation(img_path, img), meta
 
@@ -84,102 +88,7 @@ class SegmentationChexpertDataset(FolderDataset):
         return images, masks, metas
 
 
-def get_segmentation_dataset(
-    data_dir: str,
-    meta_dir: str,
-    mask_dir: str,
-    cache_dir: str,
-    split: typing.Literal["train", "valid"] | None = None,
-    frontal_lateral: typing.Literal["Frontal", "Lateral"] | None = "Frontal",
-    batch_size: int = 12,
-    seed: int = 0,
-    **kwargs,
-):
-    print("using batch size", batch_size)
-    ds = SegmentationChexpertDataset(
-        root=data_dir,
-        split=split,
-        meta_dir=meta_dir,
-        frontal_lateral=frontal_lateral,
-        transform=get_chexpert_transform(512),
-        mask_dir=mask_dir,
-        cache_dir=cache_dir,
-        **kwargs,
-    )
-    ds_loader = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=False,
-        generator=torch.Generator().manual_seed(seed),
-        collate_fn=SegmentationChexpertDataset.collate,
-    )
-    return ds_loader
-
-
 def iter_as_numpy(ds_loader):
     """Convert a DataLoader to a numpy array."""
     for images, masks, meta in ds_loader:
         yield images.cpu().numpy(), masks.cpu().numpy(), meta
-
-
-if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    model_path = "/Volumes/T7/datasets/torchxrayvision"
-    masks_path = "/Volumes/T7/datasets/chexpert_plus/masks/"
-
-    ds = get_segmentation_dataset(
-        data_dir="/Volumes/T7/datasets/chexpert_plus/PNG/PNG/",
-        meta_dir="/Volumes/T7/datasets/chexpert_plus/df_chexpert_plus_240401.csv",
-        mask_dir=masks_path,
-        cache_dir=model_path,
-        split="train",
-        frontal_lateral="Frontal",
-        batch_size=4,
-    )
-
-    batch = next(iter(ds))
-    images, masks, meta = batch
-
-    fig, ax = plt.subplots(2, 4, figsize=(12, 3))
-    for i in range(4):
-        im, sgm = images[i].squeeze(0), masks[i]
-
-        # ax[0, i].imshow(im, cmap="gray")
-        # ax[1, i].hist(im.ravel(), bins=64)
-
-        print("sgm shape", sgm.shape)
-        print("img shape", im.shape)
-
-        bone = get_group_mask(sgm, "bone", threshold=0.6).bool()
-        lung = get_group_mask(sgm, "lung", threshold=0.6).bool()
-
-        print("type of masks", bone.dtype, lung.dtype)
-        print("mask shape", bone.shape, lung.shape)
-
-        rest_mask = (torch.ones_like(im) - bone.int()).clip(0, 1) - lung.int()
-        rest_mask = rest_mask.bool()
-
-        ax[0, i].imshow(im, cmap="gray")
-        ax[0, i].axis("off")
-
-        ax[1, i].hist(im.ravel(), bins=100, alpha=0.5, label="image")
-        ax[1, i].hist(im[lung].ravel(), bins=100, alpha=0.5, label="lung")
-        ax[1, i].hist(im[bone].ravel(), bins=100, alpha=0.5, label="bone")
-        ax[1, i].hist(im[rest_mask].ravel(), bins=100, alpha=0.5, label="rest")
-        ax[1, i].axis("off")
-
-        continue
-
-        ax[0, i].imshow(im, cmap="gray")
-        ax[0, i].set_title(f"Label: {meta[i]['abs_img_path']}")
-        ax[0, i].axis("off")
-
-        a = ax[1, i].imshow(bone)
-        plt.colorbar(a)
-        a = ax[2, i].imshow(lung)
-        plt.colorbar(a)
-
-    plt.tight_layout()
-    plt.legend()
-    plt.show()

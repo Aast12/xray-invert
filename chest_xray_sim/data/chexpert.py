@@ -27,7 +27,7 @@ class ChexpertMeta(typing.TypedDict):
 
 
 def to_xray_meta(chexpert_meta: ChexpertMeta) -> XRayImageMeta:
-    try: 
+    try:
         meta: XRayImageMeta = {
             "img_id": chexpert_meta["deid_patient_id"],
             "local_img_path": chexpert_meta["abs_img_path"],
@@ -43,7 +43,6 @@ def to_xray_meta(chexpert_meta: ChexpertMeta) -> XRayImageMeta:
         raise ValueError("ChexpertMeta must contain deid_patient_id and abs_img_path")
 
 
-
 class ChexpertDataset(MetaDataset):
     frontal_lateral = None
     split = None
@@ -55,6 +54,7 @@ class ChexpertDataset(MetaDataset):
         meta_dir: str,
         split: typing.Literal["train", "valid"] | None = None,
         frontal_lateral: typing.Literal["Frontal", "Lateral"] | None = None,
+        image_size: int = 512,
         **kwargs,
     ):
         self.root = root
@@ -62,7 +62,23 @@ class ChexpertDataset(MetaDataset):
         self.split = split
         data_dir = os.path.join(root, split) if split else root
 
-        super().__init__(data_dir, meta_dir, **kwargs)
+        super().__init__(
+            data_dir, meta_dir, transform=self.get_transform(image_size), **kwargs
+        )
+
+    @classmethod
+    def get_transform(
+        cls, size: int = 512, dtype: torch.dtype = torch.float32
+    ) -> v2.Compose:
+        return v2.Compose(
+            [
+                v2.Grayscale(),
+                v2.PILToTensor(),
+                v2.Resize(size),
+                v2.CenterCrop(size),
+                v2.ToDtype(dtype, scale=True),
+            ]
+        )
 
     def is_valid_file(self, path: str) -> bool:
         if self.frontal_lateral is None and self.split is None:
@@ -119,7 +135,7 @@ class ChexpertMetaLoader(Loader):
                 split=split,
                 meta_dir=meta_dir,
                 frontal_lateral=frontal_lateral,
-                transform=self.get_transform(image_size, dtype),
+                image_size=image_size,
                 **dataset_kwargs,
             ),
             batch_size=batch_size,
