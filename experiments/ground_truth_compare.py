@@ -2,14 +2,15 @@ import os
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
 import joblib
 import torch
-from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
+from chest_xray_sim.data.segmentation_dataset import SegmentationChexpertDataset
+from chest_xray_sim.data.dataset import Loader
 from jaxtyping import Array, Float
 from chest_xray_sim.data.utils import read_image
 from chest_xray_sim.inverse.eval import batch_evaluation
-from individual import ExperimentArgs, IndividualSegmentationExperiment, default_params
-from models import ExperimentInputs
+from models import ExperimentArgs, IndividualSegmentationExperiment, default_params, ExperimentInputs
 from segmentation_utils import get_priors
 from torch import Tensor
 from utils import (
@@ -23,12 +24,9 @@ from utils.tracking import (
 )
 
 import wandb
-from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
-from chest_xray_sim.data.segmentation import (
-    MASK_GROUPS,
-    ChestSegmentation,
-    batch_get_exclusive_masks,
-)
+from chest_xray_sim.data.chexpert import ChexpertMeta, to_xray_meta
+from chest_xray_sim.segmentation import batch_get_exclusive_masks
+from chest_xray_sim.segmentation.model import ChestSegmentation, MASK_GROUPS
 
 DEBUG = True
 DTYPE = jnp.float32
@@ -104,9 +102,9 @@ def run_processing(
     )
 
     # Verify the shape is correct
-    assert (
-        inputs.images.ndim == 3
-    ), f"Expected 3D images, got shape {inputs.images.shape}"
+    assert inputs.images.ndim == 3, (
+        f"Expected 3D images, got shape {inputs.images.shape}"
+    )
 
     hyperparams.segmentation_th = segmentation_th
 
@@ -188,20 +186,24 @@ def execute(dataset, hyperparams, save_dir, batches=3):
 
 # from plot_replicate_results import plot_metrics_from_replicate
 
-def segmentation_histogram(ax, data, mask_groups,labels = MASK_GROUPS, bins=50, small_bins=30):
-    _, priors = get_priors(args.cache_dir)
-    colors = ['red', 'blue', 'green']
-    ax.hist(data.ravel(), bins=bins, alpha=0.5, label="total")
 
-    print('shapes: ', data.shape, mask_groups.shape, priors.shape)
-    print('labels?', labels)
+def segmentation_histogram(
+    ax, data, mask_groups, labels=MASK_GROUPS, bins=0.02, small_bins=0.01
+):
+    small_bins_d = np.arange(data.min(), data.max() + small_bins, small_bins)
+    bins_d = np.arange(data.min(), data.max() + bins, bins)
+
+    _, priors = get_priors(args.cache_dir)
+    colors = ["red", "blue", "green"]
+    ax.hist(data.ravel(), bins=bins_d, alpha=0.5, label="total")
+
     for i, m in enumerate(mask_groups):
         label = labels[i]
         ax.axvline(priors[i, 0], color=colors[i], linestyle="--")
         ax.axvline(priors[i, 1], color=colors[i], linestyle="--")
         ax.hist(
             data[m.squeeze() > 0].ravel(),
-            bins=small_bins,
+            bins=small_bins_d,
             alpha=0.3,
             color=colors[i],
             label=f"{label}",
@@ -210,24 +212,28 @@ def segmentation_histogram(ax, data, mask_groups,labels = MASK_GROUPS, bins=50, 
 
     return ax
 
+
 if __name__ == "__main__":
     args = args_spec()
 
     import matplotlib.pyplot as plt
     import wandb
+    import seaborn as sns
+
+    sns.set_theme()
 
     _ = wandb.login()
-    
-    path = 'alamst-kth-royal-institute-of-technology/individual-gradient-search/runs/'
+
+    path = "alamst-kth-royal-institute-of-technology/individual-gradient-search/runs/"
     # /Volumes/T7/projs/thesis/outputs/
     # run = 'ma2kaqjp'
     # run = 'cuhsitz3'
     # run = 'gcrl1gha'
-    run = 'z1o7711q'
+    run = "yiutl75n"
 
     api = wandb.Api()
 
-    run = api.run(f'{path}{run}')
+    run = api.run(f"{path}{run}")
 
     conf = run.config
     del conf["batch_size"]
@@ -247,15 +253,17 @@ if __name__ == "__main__":
         masks = torch.stack([model(im) for im in images]).squeeze(0)
         print(images.shape, masks.shape)
         metas = [
-            ChexpertMeta(
-                abs_img_path=fp,
-                deid_patient_id=pathlib.Path(fp).stem,
-                frontal_lateral="frontal",
+            to_xray_meta(
+                ChexpertMeta(
+                    abs_img_path=fp,
+                    deid_patient_id=pathlib.Path(fp).stem,
+                    frontal_lateral="frontal",
+                )
             )
             for fp in file_paths
         ]  # Placeholder for metadata
 
-        yield images, masks, metas 
+        yield images, masks, metas
 
     # dataset = get_segmentation_dataset(
     #     data_dir=args.data_dir,
@@ -268,44 +276,44 @@ if __name__ == "__main__":
     # )
 
     path = "/Volumes/T7/projs/thesis/replicates_og/"
-    tm_paths = ['/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif']
-    proc_paths = ['/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif']
-
-
-
+    tm_paths = [
+        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif"
+    ]
+    proc_paths = [
+        "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif"
+    ]
 
     def f(path):
-        dir = f'/Volumes/T7/projs/thesis/data/gt_cache/{run.id}' 
+        dir = f"/Volumes/T7/projs/thesis/data/gt_cache/{run.id}"
         if not os.path.exists(dir):
             os.makedirs(dir, exist_ok=True)
         return os.path.join(dir, path)
-    
 
     tm = jnp.array(read_image(tm_paths[0])).squeeze()
     proc = jnp.array(read_image(proc_paths[0])).squeeze()
 
-    fig, ax = plt.subplots(2, 2, figsize=(10, 8), sharex='col', sharey='col')
+    fig, ax = plt.subplots(2, 2, figsize=(10, 8), sharex="col", sharey="col")
 
-    ax[0, 0].imshow(tm, cmap='gray', vmin=0, vmax=1)
-    ax[0, 0].set_title('Real Transmission Map')
-    ax[0, 0].axis('off')
-    ax[0, 1].hist(tm.ravel(), bins=50, color='blue', alpha=0.7)
+    ax[0, 0].imshow(tm, cmap="gray", vmin=0, vmax=1)
+    ax[0, 0].set_title("Real Transmission Map")
+    ax[0, 0].axis("off")
+    ax[0, 1].hist(tm.ravel(), bins=50, color="blue", alpha=0.7)
     # ax[0, 1].set_xlabel('Pixel Intensity')
-    ax[0, 1].set_ylabel('Frequency')
+    ax[0, 1].set_ylabel("Frequency")
 
-    ax[1, 0].imshow((1 - proc) / 2.0, cmap='gray', vmin=0, vmax=1)
-    ax[1, 0].set_title('Trivial Transmission Map')
-    ax[1, 0].axis('off')
-    ax[1, 1].hist(((1 - proc) / 2.0).ravel(), bins=50, color='blue', alpha=0.7)
+    ax[1, 0].imshow((1 - proc) / 2.0, cmap="gray", vmin=0, vmax=1)
+    ax[1, 0].set_title("Trivial Transmission Map")
+    ax[1, 0].axis("off")
+    ax[1, 1].hist(((1 - proc) / 2.0).ravel(), bins=50, color="blue", alpha=0.7)
     # ax[1, 1].set_xlabel('Pixel Intensity')
-    ax[1, 1].set_ylabel('Frequency')
+    ax[1, 1].set_ylabel("Frequency")
 
+    plt.savefig(f("naive_histogram.png"))
+    # plt.show()
 
-    plt.savefig(f('naive_histogram.png'))
+    # import sys
 
-    import sys
-    sys.exit()
-
+    # sys.exit()
 
     # ax[0, 0].imshow(tm, cmap='gray', vmin=0, vmax=1)
     # ax[0, 0].set_title('Transmission Map')
@@ -317,7 +325,7 @@ if __name__ == "__main__":
     # ax[1, 1].hist((1 - proc).ravel(), bins=50, color='red', alpha=0.7)
     # ax[1, 1].set_title('Histogram of Processed Image')
 
-    plt.show()
+    # plt.show()
 
     dataset = dataset_from_files(proc_paths)
 
@@ -329,7 +337,7 @@ if __name__ == "__main__":
     # Execute sweep
     metrics, txm, weights, pred = execute(dataset, config, path)
 
-    print('Metrics', metrics)
+    print("Metrics", metrics)
 
     from chest_xray_sim.inverse.metrics import ssim, ms_ssim_l1, mse
 
@@ -338,11 +346,12 @@ if __name__ == "__main__":
     tm0 = tm[0].squeeze()
     ptm0 = txm[0].squeeze()
 
-
-
     a = mse(tm0, ptm0)
     b = ssim(tm0, ptm0)
     c = ms_ssim_l1(tm0, ptm0)
+
+    tm0 = np.array(tm0)
+    ptm0 = np.array(ptm0)
 
     print(f"recoverd TM = MSE: {a}, SSIM: {b}, MS-SSIM: {c}")
 
@@ -353,16 +362,16 @@ if __name__ == "__main__":
     lb, masks = batch_get_exclusive_masks(jnp.array(masks.cpu()), threshold=0.6)
     # masks = jnp.array(masks.cpu().numpy()).squeeze()
 
-
-    im0 = images
+    im0 = np.array(images)
     pred0 = pred[0].squeeze()
+    pred0 = np.array(pred0)
 
     naive = (1 - im0) / 2.0
 
-    fig, ax = plt.subplots(2, 2, figsize=(10, 5), sharex='col', sharey='col')
-    ax[0, 0].imshow(tm0, cmap='gray', vmin=0, vmax=1)
-    ax[1, 0].imshow(naive, cmap='gray', vmin=0, vmax=1)
-    colors = ['blue', 'red', 'green']
+    fig, ax = plt.subplots(2, 2, figsize=(10, 5), sharex="col", sharey="col")
+    ax[0, 0].imshow(tm0, cmap="gray", vmin=0, vmax=1)
+    ax[1, 0].imshow(naive, cmap="gray", vmin=0, vmax=1)
+    colors = ["blue", "red", "green"]
 
     segmentation_histogram(ax[0, 1], tm0, masks.squeeze(), small_bins=20, bins=40)
     segmentation_histogram(ax[1, 1], naive, masks.squeeze(), small_bins=20, bins=40)
@@ -371,82 +380,84 @@ if __name__ == "__main__":
     # for i, (mask, color) in enumerate(zip(masks, colors)):
     #     ax[0, 1].hist(tm0[mask > 0].ravel(), bins=30, color=color, alpha=0.3)
     #     ax[1, 1].hist(naive[mask > 0].ravel(), bins=30, color=color, alpha=0.3)
-    
-    ax[0, 0].set_title('Original Transmission Map')
-    ax[1, 0].set_title('Trivial Transmission Map')
+
+    ax[0, 0].set_title("Original Transmission Map")
+    ax[1, 0].set_title("Trivial Transmission Map")
     # ax[0, 1].set_title('Histogram of Original TM')
     # ax[1, 1].set_title('Histogram of Naive TM')
-    ax[0, 0].axis('off')
-    ax[1, 0].axis('off')
+    ax[0, 0].axis("off")
+    ax[1, 0].axis("off")
 
-    fig.savefig(f('_histogram_tm.png'))
-
-    a = mse(naive, tm0)
-    b = ssim(naive, tm0)
-    c = ms_ssim_l1(naive, tm0)
-    print(f"naive tm = mse: {a}, ssim: {b}, ms-ssim: {c}")
+    fig.savefig(f("_histogram_tm.png"))
 
     a = mse(naive, tm0)
     b = ssim(naive, tm0)
     c = ms_ssim_l1(naive, tm0)
     print(f"naive tm = mse: {a}, ssim: {b}, ms-ssim: {c}")
 
-    print('image shape', im0.shape, pred0.shape)
+    a = mse(naive, tm0)
+    b = ssim(naive, tm0)
+    c = ms_ssim_l1(naive, tm0)
+    print(f"naive tm = mse: {a}, ssim: {b}, ms-ssim: {c}")
+
+    print("image shape", im0.shape, pred0.shape)
     a = mse(im0, pred0)
     b = ssim(im0, pred0)
     c = ms_ssim_l1(im0, pred0)
 
     print(f"Image MSE: {a}, SSIM: {b}, MS-SSIM: {c}")
 
-
     fig, ax = plt.subplots(2, 2, figsize=(10, 10))
-    ax[0, 0].imshow(tm0, cmap='gray')
-    ax[0, 0].set_title('Transmission Map')
-    ax[0, 1].imshow(ptm0, cmap='gray')
-    ax[0, 1].set_title('Recovered Transmission Map')
-    ax[1, 0].imshow(im0, cmap='gray')
-    ax[1, 0].set_title('Original Image')
-    ax[1, 1].imshow(pred0, cmap='gray')
+    ax[0, 0].imshow(tm0, cmap="gray")
+    ax[0, 0].set_title("Transmission Map")
+    ax[0, 1].imshow(ptm0, cmap="gray")
+    ax[0, 1].set_title("Recovered Transmission Map")
+    ax[1, 0].imshow(im0, cmap="gray")
+    ax[1, 0].set_title("Original Image")
+    ax[1, 1].imshow(pred0, cmap="gray")
 
     fig, ax = plt.subplots(1, 3, figsize=(15, 5))
-    ax[0].imshow(ptm0, cmap='gray', vmin=0, vmax=1)
-    ax[0].set_title('Recovered Transmission Map')
-    ax[1].imshow(tm0, cmap='gray', vmin=0, vmax=1)
-    ax[1].set_title('Original Transmission Map')
-    ax[2].imshow(naive, cmap='gray', vmin=0, vmax=1)
-    ax[2].set_title('Trivial Transmission Map')
+    ax[0].imshow(ptm0, cmap="gray", vmin=0, vmax=1)
+    ax[0].set_title("Recovered Transmission Map")
+    ax[1].imshow(tm0, cmap="gray", vmin=0, vmax=1)
+    ax[1].set_title("Original Transmission Map")
+    ax[2].imshow(naive, cmap="gray", vmin=0, vmax=1)
+    ax[2].set_title("Trivial Transmission Map")
 
-    ax[0].axis('off')
-    ax[1].axis('off')
-    ax[2].axis('off')
+    ax[0].axis("off")
+    ax[1].axis("off")
+    ax[2].axis("off")
     plt.tight_layout()
 
-    fig, ax = plt.subplots(3, 2, figsize=(10, 10), sharex='col', sharey='col')
-    ax[0, 0].imshow(ptm0, cmap='gray', vmin=0, vmax=1)
-    ax[0, 0].set_title('Recovered Transmission Map')
+    contrasted_im0 = ptm0.clip(0, 0.6) / 0.6
+    # save image
+    plt.imsave(
+        f("contrasted recovered.png"), contrasted_im0, cmap="gray", vmin=0, vmax=1
+    )
+    contrasted_tm0 = tm0.clip(0, 0.6) / 0.6
+    plt.imsave(f("contrasted tm.png"), contrasted_tm0, cmap="gray")
+
+    fig, ax = plt.subplots(2, 2, figsize=(10, 10), sharex="col", sharey="col")
+
+    im = ax[0, 0].imshow(ptm0, cmap="gray", vmin=0, vmax=0.6)
+    fig.colorbar(im, ax=ax[0, 0])
+    ax[0, 0].set_title("Recovered Transmission Map")
     # ax[0, 1].hist(ptm0.ravel(), bins=50, color='blue', alpha=0.7)
-    segmentation_histogram(ax[0, 1], ptm0, masks.squeeze(), small_bins=20, bins=40)
-    # ax[0, 1].set_title('Histogram of Processed TM')
-    ax[1, 0].imshow(naive, cmap='gray', vmin=0, vmax=1)
-    ax[1, 0].set_title('Trivial Transmission Map')
-    # ax[1, 1].hist(naive.ravel(), bins=50, color='red', alpha=0.7)
+    segmentation_histogram(
+        ax[0, 1], ptm0, masks.squeeze(), small_bins=0.015, bins=0.015
+    )
 
-    segmentation_histogram(ax[1, 1], naive, masks.squeeze(), small_bins=20, bins=40)
-    # ax[1, 1].set_title('Trivial Transmission Map')
-    ax[2, 0].imshow(tm0, cmap='gray', vmin=0, vmax=1)
-    ax[2, 0].set_title('Original Transmission Map')
+    im = ax[1, 0].imshow(tm0, cmap="gray", vmin=0, vmax=0.6)
+    fig.colorbar(im, ax=ax[1, 0])
+    ax[1, 0].set_title("Original Transmission Map")
     # ax[2, 1].hist(tm0.ravel(), bins=50, color='green', alpha=0.7)
-    segmentation_histogram(ax[2, 1], tm0, masks.squeeze(), small_bins=20, bins=40)
+    segmentation_histogram(ax[1, 1], tm0, masks.squeeze(), small_bins=0.015, bins=0.015)
     # ax[2, 1].set_title('Histogram of Original TM')
-    ax[0, 0].axis('off')
-    ax[1, 0].axis('off')
-    ax[2, 0].axis('off')
-    ax[0, 1].set_xlabel('Pixel Intensity')
-    ax[1, 1].set_xlabel('Pixel Intensity')  
+    ax[0, 0].axis("off")
+    ax[1, 0].axis("off")
+    ax[0, 1].set_xlabel("Pixel Intensity")
+    ax[1, 1].set_xlabel("Pixel Intensity")
 
-    fig.savefig(f('cmp_histogram.png'))
+    fig.savefig(f("cmp_histogram.pdf"))
 
     plt.show()
-
-
-

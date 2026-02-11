@@ -31,8 +31,6 @@ BatchT = Float[ArrayT, "*batch rows cols"]
 fBatchT = Float[ArrayT, "*batch rows cols"]
 iBatchT = Integer[ArrayT, "*batch rows cols"]
 
-SegmentationT = Float[ArrayT, "*batch labels rows cols"]
-
 
 # TODO: duplicate definition segmentation.py
 # TODO: some usages might expect different dimension sizes for mask_groups,

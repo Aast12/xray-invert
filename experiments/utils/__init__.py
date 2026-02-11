@@ -11,6 +11,7 @@ import joblib
 import numpy as np
 import optax
 import torch
+from chest_xray_sim.data.meta import XRayImageMeta
 from chest_xray_sim.data.utils import read_image
 import chest_xray_sim.utils.projections as projections
 from cv2.typing import MatLike
@@ -20,8 +21,7 @@ from skimage.transform import resize
 
 import chest_xray_sim.inverse.operators as ops
 import wandb
-from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
-from chest_xray_sim.inverse.core import base_optimize
+from chest_xray_sim.data.chexpert import ChexpertMeta
 from chest_xray_sim.types import (
     ForwardT,
     SegmentationT,
@@ -46,7 +46,8 @@ def dataset_from_files(file_paths, model):
         for fp in file_paths
     ]  # Placeholder for metadata
 
-    yield images, masks, metas 
+    yield images, masks, metas
+
 
 def projection_with_spec(spec):
     def projection_wrapper(
@@ -125,10 +126,9 @@ def batch_forward(single_forward):
     return forward_wrapper
 
 
-def chexpert_filenames(meta_batch):
-
+def chexpert_filenames(meta_batch: list[XRayImageMeta]):
     return [
-        f"{m['deid_patient_id']}_{os.path.split(os.path.split(m['abs_img_path'])[0])[1]}_{os.path.basename(m['abs_img_path'])}"
+        f"{m['img_id']}_{os.path.split(os.path.split(m['local_img_path'])[0])[1]}_{os.path.basename(m['local_img_path'])}"
         for m in meta_batch
     ]
 
@@ -184,11 +184,11 @@ def save_image(img, path: str, bits=8):
 def process_results(
     images: ForwardT,
     segmentations: SegmentationT,
-    meta_batch: list[ChexpertMeta],
+    meta_batch: list[XRayImageMeta],
     value_ranges: ValueRangeT,
     results,
     save_dir=None,
-    label=None
+    label=None,
 ):
     txm, weights, pred = results
 
@@ -544,9 +544,9 @@ def build_optim_runner(w0_builder, operator, loss_fn, **opt_params_high):
 
         operator_params = operator.keys
         missing_params = set(operator_params) - set(w0.keys())
-        assert (
-            len(missing_params) == 0
-        ), "Initial weights missing for operator params: " + ", ".join(missing_params)
+        assert len(missing_params) == 0, (
+            "Initial weights missing for operator params: " + ", ".join(missing_params)
+        )
 
         opt_params = dict_merge(def_opt_params, opt_params_high, opt_params)
 

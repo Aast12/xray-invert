@@ -1,17 +1,19 @@
 import functools
 import math
 import os
-from typing import Any
+from typing import Any, cast
 
 import time
 import jax.numpy as jnp
 import joblib
 import matplotlib
-from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
+from chest_xray_sim.data.dataset import Loader
+from chest_xray_sim.data.segmentation_dataset import SegmentationChexpertDataset
 from jaxtyping import Array, Float
-from chest_xray_sim.inverse.eval import batch_evaluation
-from individual import ExperimentArgs, IndividualSegmentationExperiment, default_params
-from models import ExperimentInputs
+from chest_xray_sim.inverse.eval import EvalMetrics, batch_evaluation
+from chest_xray_sim.segmentation.model import MASK_GROUPS
+from chest_xray_sim.segmentation.utils import batch_get_exclusive_masks
+from models import ExperimentArgs, IndividualSegmentationExperiment, default_params, ExperimentInputs
 from segmentation_utils import get_priors
 from torch import Tensor
 from utils import (
@@ -25,8 +27,7 @@ from utils.tracking import (
 )
 
 import wandb
-from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
-from chest_xray_sim.data.segmentation import MASK_GROUPS, batch_get_exclusive_masks
+from chest_xray_sim.data.chexpert import ChexpertMeta
 
 DEBUG = True
 DTYPE = jnp.float32
@@ -45,6 +46,8 @@ args_spec = experiment_args(
 
 times = []
 lens = []
+
+
 def process_results(
     images,
     segmentations,
@@ -103,9 +106,9 @@ def run_processing(
     )
 
     # Verify the shape is correct
-    assert (
-        inputs.images.ndim == 3
-    ), f"Expected 3D images, got shape {inputs.images.shape}"
+    assert inputs.images.ndim == 3, (
+        f"Expected 3D images, got shape {inputs.images.shape}"
+    )
 
     hyperparams.segmentation_th = segmentation_th
 
@@ -156,8 +159,7 @@ def run_processing(
     return None
 
 
-
-def execute(dataset, hyperparams, save_dir, batches=3):
+def execute(dataset, hyperparams, save_dir, batches=10):
     _, value_ranges = get_priors(args.cache_dir, collimated_region_bound=0.4)
 
     metrics = []
@@ -167,10 +169,10 @@ def execute(dataset, hyperparams, save_dir, batches=3):
     weights = []
     pred = []
 
-    it = iter(dataset)
+    for i, batch in enumerate(dataset):
+        if i >= batches:
+            break
 
-    for i in range(batches):
-        batch = next(it)
         images, masks, meta = batch
 
         res = run_processing(
@@ -202,9 +204,12 @@ def execute(dataset, hyperparams, save_dir, batches=3):
 
 memory = joblib.Memory()
 
-def segmentation_histogram(ax, data, mask_groups,labels = MASK_GROUPS, bins=50, small_bins=30):
+
+def segmentation_histogram(
+    ax, data, mask_groups, labels=MASK_GROUPS, bins=50, small_bins=30
+):
     _, priors = get_priors(args.cache_dir)
-    colors = ['red', 'blue', 'green']
+    colors = ["red", "blue", "green"]
     ax.hist(data.ravel(), bins=bins, alpha=0.5, label="total")
 
     for i, m in enumerate(mask_groups):
@@ -222,6 +227,7 @@ def segmentation_histogram(ax, data, mask_groups,labels = MASK_GROUPS, bins=50, 
 
     return ax
 
+
 if __name__ == "__main__":
     args = args_spec()
 
@@ -233,12 +239,12 @@ if __name__ == "__main__":
     path = "alamst-kth-royal-institute-of-technology/individual-gradient-search/runs/"
     # /Volumes/T7/projs/thesis/outputs/
     # run = "ma2kaqjp"
-    run = "gcrl1gha"
+    run = "yiutl75n"
     # run = 'cuhsitz3'
 
     config = None
     api = wandb.Api()
-    run =  api.run(f"{path}{run}")
+    run = api.run(f"{path}{run}")
     run_id = run.id
     conf = run.config
 
@@ -252,10 +258,13 @@ if __name__ == "__main__":
 
     config = ExperimentArgs(**conf)
     batch_size = 64
+    batches = 5
 
     cache = True
     path = "/Volumes/T7/projs/thesis/replicates/"
-    cache_path = f"/Volumes/T7/projs/thesis/replicates_cache/{run_id}_{batch_size}"
+    cache_path = (
+        f"/Volumes/T7/projs/thesis/replicates_cache/{run_id}_{batch_size}_{batches}"
+    )
     if not os.path.exists(cache_path):
         os.makedirs(cache_path, exist_ok=True)
 
@@ -268,39 +277,48 @@ if __name__ == "__main__":
         imgs = joblib.load(os.path.join(cache_path, "imgs.joblib"))
         masks = joblib.load(os.path.join(cache_path, "masks.joblib"))
         txm = joblib.load(os.path.join(cache_path, "txm.joblib"))
-        pred = joblib.load(os.path.join(cache_path, "pred.joblib")) 
+        pred = joblib.load(os.path.join(cache_path, "pred.joblib"))
         weights = joblib.load(os.path.join(cache_path, "weights.joblib"))
         metrics = joblib.load(os.path.join(cache_path, "metrics.joblib"))
-        
+
         # a, b = get_priors(args.cache_dir,)
         # metrics = batch_evaluation(imgs.squeeze(), txm.squeeze(), pred.squeeze(), masks.squeeze(), b)
         # joblib.dump(metrics, os.path.join(cache_path, "metrics.joblib"))
     except Exception as e:
-        dataset = get_segmentation_dataset(
-            data_dir=args.data_dir,
+        dataset = SegmentationChexpertDataset(
+            root=args.data_dir,
             meta_dir=args.meta_dir,
             mask_dir=args.mask_dir,
             cache_dir=args.cache_dir,
             split=args.split,
             frontal_lateral=args.frontal_lateral,
+        )
+
+        dataset = Loader(
+            dataset,
             batch_size=batch_size,
+            collate_fn=SegmentationChexpertDataset.collate,
+            shuffle=False,
         )
 
         times = []
 
-        metrics_, imgs_, masks_, txm_, weights_, pred_ = execute(dataset, config, path)
+        metrics_, imgs_, masks_, txm_, weights_, pred_ = execute(
+            dataset, config, path, batches=batches
+        )
 
-        print('times: ', times)
-        print('lens: ', lens)
+        print("times: ", times)
+        print("lens: ", lens)
 
         imgs = jnp.concatenate(imgs_, axis=0)
         masks = jnp.concatenate(masks_, axis=0)
         txm = jnp.concatenate(txm_, axis=0)
-        weights = {k: jnp.concatenate([w[k] for w in weights_], axis=0) for k in weights_[0].keys()}
+        weights = {
+            k: jnp.concatenate([w[k] for w in weights_], axis=0)
+            for k in weights_[0].keys()
+        }
         pred = jnp.concatenate(pred_, axis=0)
-        metrics = functools.reduce(
-            lambda x, y: x.concat(y), metrics_[1:], metrics_[0]
-        )
+        metrics = functools.reduce(lambda x, y: x.concat(y), metrics_[1:], metrics_[0])
         # metrics = sum(metrics_, [])
 
         joblib.dump(imgs, os.path.join(cache_path, "imgs.joblib"))
@@ -309,7 +327,6 @@ if __name__ == "__main__":
         joblib.dump(pred, os.path.join(cache_path, "pred.joblib"))
         joblib.dump(weights, os.path.join(cache_path, "weights.joblib"))
         joblib.dump(metrics, os.path.join(cache_path, "metrics.joblib"))
-
 
     def f(path):
         dir = os.path.join(cache_path, "figures")
@@ -320,9 +337,37 @@ if __name__ == "__main__":
 
     import numpy as np
     import random
+    import seaborn as sns
+    import pandas as pd
 
-    metric = metrics
+    sns.set_theme()
+
+    metric: EvalMetrics = cast(EvalMetrics, metrics)
     weighs = weights
+
+    segmentation_labels = MASK_GROUPS
+    label_count = len(segmentation_labels) + 1
+    print("labels: ", label_count)
+    label_count = 2
+    fig, ax = plt.subplots(1, 2, figsize=(label_count * 6, 5))
+
+    ax[0].set_title("Data Fidelity")
+    ax[0].set_xlabel("$\\mathcal{L}^{\\mathrm{Mix}}$")
+    sns.histplot(
+        np.array(metric.ms_ssim),
+        kde=True,
+        bins=25,
+        ax=ax[0],
+    )
+    ax[1].set_title(f"Anatomical Compliance")
+    ax[1].set_xlabel("Penalty")
+    sns.histplot(
+        np.array(metric.penalties),
+        kde=True,
+        bins=25,
+        ax=ax[1],
+    )
+    fig.savefig(f("metric_distributions.pdf"))
 
     sample_id = random.choice(range(len(pred)))
 
@@ -330,7 +375,6 @@ if __name__ == "__main__":
     txm_sample = txm[sample_id].squeeze()
     pred_sample = pred[sample_id].squeeze()
     img_sample = imgs[sample_id].squeeze()
-
 
     fig, ax = plt.subplots(1, len(weighs.keys()), figsize=(15, 5))
     for i, (key, value) in enumerate(weighs.items()):
@@ -342,21 +386,27 @@ if __name__ == "__main__":
     num_bins = 50
     hist_matrix = []
     for i in range(num_samples):
-        hist, bin_edges = np.histogram(txm[i].ravel(), bins=num_bins, range=(0, 1), density=True)
+        hist, bin_edges = np.histogram(
+            txm[i].ravel(), bins=num_bins, range=(0, 1), density=True
+        )
         hist_matrix.append(hist)
 
     hist_matrix = np.array(hist_matrix).T  # shape: (num_bins, num_samples)
     fig_hist, ax_hist = plt.subplots(figsize=(12, 6))
-    im = ax_hist.imshow(hist_matrix, aspect='auto', origin='lower', cmap='viridis',
-                        extent=[0, num_samples, bin_edges[0], bin_edges[-1]])
-    ax_hist.set_xlabel('Sample Index')
-    ax_hist.set_ylabel('Transmission Map  Value')
+    im = ax_hist.imshow(
+        hist_matrix,
+        aspect="auto",
+        origin="lower",
+        cmap="viridis",
+        extent=[0, num_samples, bin_edges[0], bin_edges[-1]],
+    )
+    ax_hist.set_xlabel("Sample Index")
+    ax_hist.set_ylabel("Transmission Map  Value")
     # ax_hist.set_title('TXM Sample Histograms (Heatmap)')
-    fig_hist.colorbar(im, ax=ax_hist, label='Density')
+    fig_hist.colorbar(im, ax=ax_hist, label="Density")
     plt.tight_layout()
 
     fig_hist.savefig(f("histogram_heatmap.png"))
-
 
     max_penalty_idx = jnp.argmax(metric.penalties)
     min_penalty_idx = jnp.argmin(metric.penalties)
@@ -371,10 +421,10 @@ if __name__ == "__main__":
     min_ms_ssim_idx = jnp.argmin(metric.ms_ssim)
 
     indices = {
-        'penalty': (max_penalty_idx, min_penalty_idx),
+        "penalty": (max_penalty_idx, min_penalty_idx),
         # 'mse': (max_mse_idx, min_mse_idx),
-        # 'ssim': (max_ssim_idx, min_ssim_idx),   
-        '$\\mathcal{L}^{\\text{Mix}}$': (max_ms_ssim_idx, min_ms_ssim_idx),
+        # 'ssim': (max_ssim_idx, min_ssim_idx),
+        "$\\mathcal{L}^{\\text{Mix}}$": (max_ms_ssim_idx, min_ms_ssim_idx),
     }
 
     # plot all txms in the extreme cases
@@ -397,13 +447,16 @@ if __name__ == "__main__":
     step = math.ceil(ms_ssim_errors.shape[0] / num_samples_to_plot)
     percentile_labels = np.linspace(0, 100, num_samples_to_plot, dtype=int)
     indices_percentiles = indices_perc[::step]
-    print('indices_percentiles: ', indices_percentiles)
+    print("indices_percentiles: ", indices_percentiles)
 
     fig, ax = plt.subplots(2, num_samples_to_plot, figsize=(3 * num_samples_to_plot, 8))
     for i, idx in enumerate(indices_percentiles):
         ax[0, i].imshow(pred[idx].squeeze(), cmap="gray", vmin=0, vmax=1)
-        ax[0, i].set_title("$\\mathcal{L}^{\\text{Mix}}$:" + f" {ms_ssim_errors[idx]:.3f}\nP{percentile_labels[i]}")
-        ax[0, i].axis('off')
+        ax[0, i].set_title(
+            "$\\mathcal{L}^{\\text{Mix}}$:"
+            + f" {ms_ssim_errors[idx]:.3f}\nP{percentile_labels[i]}"
+        )
+        ax[0, i].axis("off")
         ax[1, i].imshow(txm[idx].squeeze(), cmap="gray", vmin=0, vmax=1)
         ax[1, i].axis("off")
     # fig.suptitle("Predicted Images at Uniform $\mathcal{L}^{\\text{Mix}}$ Percentiles")
@@ -421,26 +474,16 @@ if __name__ == "__main__":
 
     # fig.savefig(f("extreme_proc.svg"))
 
-
-    fig, ax =  plt.subplots(2, 2, figsize=(20, 10))
+    fig, ax = plt.subplots(2, 2, figsize=(20, 10))
     for i, (key, (max_idx, min_idx)) in enumerate(indices.items()):
-        segmentation_histogram(
-            ax[0, i],
-            txm[max_idx].squeeze(),
-            masks[max_idx]
-        )
+        segmentation_histogram(ax[0, i], txm[max_idx].squeeze(), masks[max_idx])
         ax[0, i].set_title(f"Max {key} Transmission Map Histogram")
-        segmentation_histogram(
-            ax[1, i],
-            txm[min_idx].squeeze(),
-            masks[min_idx]
-        )
+        segmentation_histogram(ax[1, i], txm[min_idx].squeeze(), masks[min_idx])
         ax[1, i].set_title(f"Min {key} Transmission Map Histogram")
 
     fig.savefig(f("extreme_histograms.png"))
 
-
-    fig, ax = plt.subplots(1,2, figsize=(10, 10)) 
+    fig, ax = plt.subplots(1, 2, figsize=(10, 10))
     ax = ax.flatten()
 
     ax[0].boxplot(metric.penalties.ravel(), showfliers=False)
@@ -449,16 +492,14 @@ if __name__ == "__main__":
     # ax[1].set_xscale("log")
     ax[1].set_title("$\\mathcal{L}^{\\text{Mix}}")
 
-
     fig.savefig(f("metrics.png"))
-
 
     fig, ax = plt.subplots(1, 2, figsize=(15, 7))
     ax[0].imshow(img_sample, cmap="gray", vmin=0, vmax=1)
-    ax[0].axis('off')
+    ax[0].axis("off")
     ax[0].set_title("Original Image")
     ax[1].imshow(pred_sample, cmap="gray", vmin=0, vmax=1)
-    ax[1].axis('off')
+    ax[1].axis("off")
     ax[1].set_title("Estimated Processed Image")
     plt.tight_layout()
 
@@ -493,7 +534,6 @@ if __name__ == "__main__":
 
     fig.savefig(f("trivial_hist_comparison.png"))
 
-
     # for i, m in enumerate(mask):
     #     label = MASK_GROUPS[i]
     #     ax[0, 0].hist(
@@ -505,8 +545,6 @@ if __name__ == "__main__":
     #     ax[1, 0].hist(
     #         naive[m.squeeze() > 0].ravel(), bins=50, alpha=0.3, label=f"{label}"
     #     )
-
-
 
     ax[1, 0].legend()
     ax[0, 0].legend()

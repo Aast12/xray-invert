@@ -9,8 +9,7 @@ from chest_xray_sim.data.segmentation_dataset import (
 )
 from jaxtyping import Array, Float
 from utils.logging import summary
-from individual import IndividualSegmentationExperiment, default_params
-from models import ExperimentInputs
+from models import IndividualSegmentationExperiment, default_params, ExperimentInputs
 from segmentation_utils import get_priors
 from torch import Tensor
 from utils import (

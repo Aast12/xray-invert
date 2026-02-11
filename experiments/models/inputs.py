@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+
 import jax.numpy as jnp
 
 from chest_xray_sim.segmentation.model import MaskGroupsT
