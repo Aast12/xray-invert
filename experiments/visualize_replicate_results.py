@@ -6,7 +6,8 @@ import seaborn as sns
 from matplotlib.gridspec import GridSpec
 import joblib
 from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
-from individual_replicate import execute, ExperimentArgs
+from replicate import execute
+from models import ExperimentArgs
 from utils import experiment_args
 import pandas as pd
 from chest_xray_sim.inverse.eval import batch_evaluation

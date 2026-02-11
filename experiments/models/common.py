@@ -6,6 +6,7 @@ import optax
 import chest_xray_sim.utils.projections as proj
 from jaxtyping import PyTree
 from chest_xray_sim.inverse import metrics
+from chest_xray_sim.pipeline.config import PipelineConfig
 from chest_xray_sim.pipeline.forward import forward_single
 from chest_xray_sim.pipeline.loss import compute_loss
 from .inputs import ExperimentInputs
@@ -123,7 +124,31 @@ class DualBandForwardMixin:
         self.hyperparams = hyperparams
         self.common_weights = common_weights
         self.w0 = w0
-        self._pipeline_config = hyperparams.to_pipeline_config()
+        if hasattr(hyperparams, 'to_pipeline_config'):
+            self._pipeline_config = hyperparams.to_pipeline_config()
+        else:
+            self._pipeline_config = PipelineConfig(
+                n_steps=hyperparams.n_steps,
+                lr=hyperparams.lr,
+                optimizer=hyperparams.optimizer,
+                eps=hyperparams.eps,
+                sigma=hyperparams.sigma,
+                high_sigma=hyperparams.high_sigma,
+                windowing_type=hyperparams.windowing_type,
+                total_variation=hyperparams.total_variation,
+                prior_weight=hyperparams.prior_weight,
+                smooth_metric=hyperparams.smooth_metric,
+                data_fidelity=hyperparams.data_fidelity,
+                max_enhancement=hyperparams.max_enhancement,
+                low_min_enhancement=hyperparams.low_min_enhancement,
+                high_min_enhancement=hyperparams.high_min_enhancement,
+                PRNGKey=hyperparams.PRNGKey,
+                tm_init_params=hyperparams.tm_init_params,
+                constant_weights=hyperparams.constant_weights,
+                momentum=hyperparams.momentum,
+                weight_decay=hyperparams.weight_decay,
+                segmentation_th=getattr(hyperparams, 'segmentation_th', 0.6),
+            )
 
         self.projection_fn = projection_with_spec(def_projection_spec(hyperparams))
 

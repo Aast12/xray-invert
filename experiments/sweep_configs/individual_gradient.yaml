@@ -1,8 +1,8 @@
-name: individual_gradient_optimization
+name: individual_gradient_optimization_v2
 method: bayes
 metric:
   name: ms_ssim_l1_max
-  goal: minimize 
+  goal: minimize
 early_terminate:
   type: hyperband
   strict: true
@@ -12,20 +12,22 @@ parameters:
     value: double-band
   lr:
     min: 0.001
-    max: 0.03 
-  max_sigma:
-    value: 4.0
-  sigma:
-    min: 1.5
-    max: 2.0
+    max: 0.03
+  max_sigma: #deprecated
+    value: 10.0
+  # enhancement on high frequencies
+  high_min_enhancement:
+    min: 0.1
+    max: 0.5
   high_sigma:
-    min: 5.0
-    max: 7.0
+    value: 10.0
+  low_min_enhancement:
+    min: 0.1
+    max: 0.6
+  sigma:
+    value: 1.0
   data_fidelity:
     value: l2
-    # values:
-    #   - l2
-      # - ssim
   max_enhancement:
     value: 0.8
     # min: 0.5
@@ -33,32 +35,33 @@ parameters:
   n_steps:
     values:
       - 300
-      - 500
+      # - 500
   total_variation:
-    # value: 0.
-    min: 0.00000001
-    max: 0.000003
+    min: 1.e-9
+    max: 1.e-5
   prior_weight:
-    min: 0.8
-    max: 1.0 
+    min: 0.0
+    max: 0.0005
   PRNGKey:
     value: 0
   tm_init_params:
-    values: 
-      - - negative
-        - null
-      - - naive 
+    values:
+      # - - negative
+      #   - null
+      - - naive
         - null
   constant_weights:
     value: false
   eps:
-    value: 1.e-6
+    values:
+      - 1.e-6
+      - 1.e-7
   smooth_metric:
-    value: tikonov
-    # values:
-      # # - tv
-      # - tikonov
-      # - none
+    values:
+      - tv
+      - tikonov
+      - none
+      # - tv
       # - tv2
   use_band_similarity:
     value: false
@@ -66,11 +69,11 @@ parameters:
     #   - true
     #   - false
   windowing_type:
-    value: sigmoid
-    # values:
-    #   - sigmoid
-    #   - linear
-  
+    # value: sigmoid
+    values:
+      - sigmoid
+      - linear
+
   # Individual gradient optimizer specific parameters
   optimizer:
     values:
@@ -80,17 +83,17 @@ parameters:
       # - adamw
   # Optimizer-specific parameters
   momentum:
-    value: 0.9  # For SGD
+    value: 0.9 # For SGD
   weight_decay:
     value: 0.0001
     # values:
     #   - 0.0
     #   - 0.0001
     #   - 0.001
-  
+
   batch_size:
-    value: 24
+    value: 8
   # Sub-batch processing
   sub_batch_size:
     values:
-      - 8
+      - 4

@@ -2,12 +2,8 @@ from typing import overload
 import jax
 import jax.numpy as jnp
 import torch
-import torchxrayvision as xrv
 from jaxtyping import Array, Float, Integer
 from torch import Tensor
-from torchvision.transforms import v2
-from torchxrayvision.baseline_models.chestx_det import PSPNet
-from chest_xray_sim.data.chexpert import ChexpertMetaLoader
 from chest_xray_sim.types import ArrayT
 
 from chest_xray_sim.segmentation.model import (
@@ -93,6 +89,19 @@ def substract_mask(
     mask0,
     exclude_mask,
 ):
+    """
+    Subtracts the given mask from the input image.
+
+    Parameters:
+        image (numpy.ndarray): The input image array.
+        mask (numpy.ndarray): The mask to subtract from the image. Must be the same shape as image.
+
+    Returns:
+        numpy.ndarray: The resulting image after subtracting the mask.
+
+    Raises:
+        ValueError: If the image and mask shapes do not match.
+    """
     if isinstance(mask0, Array):
         return jnp.bitwise_xor(mask0, mask0 * exclude_mask)
     if isinstance(mask0, Tensor):
@@ -102,52 +111,54 @@ def substract_mask(
 
 
 @overload
-def _join_masks(
-    pred: Float[Array, "num_classes height width"],
+def _sigmoid_mask_sum(
+    multimask: Float[Array, "num_classes height width"],
     threshold: float | None,
 ) -> Float[Array, "height width"]: ...
 @overload
-def _join_masks(
-    pred: Float[Tensor, "num_classes height width"],
+def _sigmoid_mask_sum(
+    multimask: Float[Tensor, "num_classes height width"],
     threshold: float | None,
 ) -> Float[Tensor, "height width"]: ...
-def _join_masks(
-    pred,
+def _sigmoid_mask_sum(
+    multimask,
     threshold=None,
 ):
     aggregated = (
-        jax.nn.sigmoid(pred) if isinstance(pred, Array) else torch.sigmoid(pred)
+        jax.nn.sigmoid(multimask)
+        if isinstance(multimask, Array)
+        else torch.sigmoid(multimask)
     )
 
     if threshold is not None:
-        if isinstance(pred, Array):
+        if isinstance(multimask, Array):
             aggregated = jnp.where(aggregated < threshold, 0, 1)
-        elif isinstance(pred, Tensor):
+        elif isinstance(multimask, Tensor):
             aggregated = torch.where(aggregated < threshold, 0, 1)
         else:
-            raise TypeError(f"Unsupported type {type(pred)}")
+            raise TypeError(f"Unsupported type {type(multimask)}")
 
     if isinstance(aggregated, Array):
         aggregated = aggregated.sum(axis=0).clip(0, 1)
     elif isinstance(aggregated, Tensor):
         aggregated = aggregated.sum(dim=0).clip(0, 1)
     else:
-        raise TypeError(f"Unsupported type {type(pred)}")
+        raise TypeError(f"Unsupported type {type(multimask)}")
 
     return aggregated
 
 
 @overload
-def _batch_join_masks(
+def _batch_sigmoid_mask_sum(
     pred: Float[Array, "batch labels height width"],
     threshold=...,
 ) -> Float[Array, "batch labels height width"]: ...
 @overload
-def _batch_join_masks(
+def _batch_sigmoid_mask_sum(
     pred: Float[Tensor, "batch labels height width"],
     threshold=...,
 ) -> Float[Tensor, "batch labels height width"]: ...
-def _batch_join_masks(
+def _batch_sigmoid_mask_sum(
     pred,
     threshold: float | None = None,
 ) -> Array | Tensor:
@@ -208,9 +219,9 @@ def get_group_mask(
         q = jnp.array(q)
 
     if isinstance(pred, Array):
-        return _join_masks(pred[q], threshold)
+        return _sigmoid_mask_sum(pred[q], threshold)
     else:
-        return _join_masks(pred[q], threshold)
+        return _sigmoid_mask_sum(pred[q], threshold)
 
 
 @overload
@@ -240,14 +251,14 @@ def batched_get_group_mask(
     """
     labels = MASK_GROUPS_LABELS[group]
 
-    q = [[label] for label in labels]
+    q = [SEGMENTATION_LABELS[label] for label in labels]
     if isinstance(pred, Array):
         q = jnp.array(q)
 
     if isinstance(pred, Array):
-        return _batch_join_masks(pred[:, q], threshold)
+        return _batch_sigmoid_mask_sum(pred[:, q], threshold)
     else:
-        return _batch_join_masks(pred[:, q], threshold)
+        return _batch_sigmoid_mask_sum(pred[:, q], threshold)
 
 
 def batch_get_exclusive_masks(
@@ -295,176 +306,3 @@ def get_exclusive_masks(
         exclusive_masks.append(exclusive_mask)
 
     return {group_id: mask for group_id, mask in zip(MASK_GROUPS, exclusive_masks)}
-
-
-if __name__ == "__main__":
-    import sys
-
-    import matplotlib.pyplot as plt
-
-    from chest_xray_sim.data.utils import read_image
-    from chest_xray_sim.segmentation.model import ChestSegmentation
-
-    model_path = "/Volumes/T7/datasets/torchxrayvision"
-    samples = [
-        (
-            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif",
-            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
-        ),
-        (
-            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1.tif",
-            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1_proc.tif",
-        ),
-        (
-            "/Volumes/T7/projs/thesis/data/conventional_transmissionmap_32bit_[0 1].tif",
-            None,
-        ),
-    ]
-
-    img_path, fwd_path = samples[0]
-    base = read_image(fwd_path)
-
-    print("base shape:", base.shape)
-
-    model = ChestSegmentation(cache_dir=model_path)
-
-    base_seg = model(base)
-
-    print("base_seg shape:", base_seg.shape)
-
-    images = ChexpertMetaLoader( 
-        data_dir="/Volumes/T7/datasets/chexpert_plus/PNG/PNG/",
-        split="train",
-        meta_dir="/Volumes/T7/datasets/chexpert_plus/df_chexpert_plus_240401.csv",
-        frontal_lateral="Frontal",
-        batch_size=15,
-    )
-
-    batch = images.next()
-
-    batch = next(iter(images))
-
-    img, meta = batch
-    import os
-
-    path = [os.path.basename(m["abs_img_path"]) for m in meta]
-
-    print("images shape:", img.shape)
-
-    segmentations = model(img)
-
-    print("segmentations shape:", segmentations.shape)
-
-    fig, ax = plt.subplots(3, 4, figsize=(15, 5))
-
-    for i in range(4):
-        if i == 3:
-            im, sgm = base.squeeze(0), base_seg[0]
-        else:
-            im, sgm = img[i].squeeze(0), segmentations[i]
-
-        print("sgm shape", sgm.shape)
-        print("img shape", im.shape)
-
-        bone = get_group_mask(sgm, "bone", threshold=None)
-        lung = get_group_mask(sgm, "lung", threshold=None)
-
-        ax[0, i].imshow(im, cmap="gray")
-        ax[0, i].set_title(f"Label: {path[i]}")
-        ax[0, i].axis("off")
-
-        a = ax[1, i].imshow(bone)
-        plt.colorbar(a)
-        a = ax[2, i].imshow(lung)
-        plt.colorbar(a)
-    #
-    plt.show()
-
-    sys.exit(0)
-
-    model_path = "/Volumes/T7/datasets/torchxrayvision"
-    samples = [
-        (
-            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-oprocess.tif",
-            "/Volumes/T7/projs/thesis/data/Processed vs unprocessed real GE scanner/Z01-process.tif",
-        ),
-        (
-            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1.tif",
-            "/Volumes/T7/projs/thesis/outputs/0ji4skar/patient02609_study1_proc.tif",
-        ),
-        (
-            "/Volumes/T7/projs/thesis/data/conventional_transmissionmap_32bit_[0 1].tif",
-            None,
-        ),
-    ]
-
-    img_path, fwd_path = samples[0]
-    base = read_image(img_path)
-
-    model = ChestSegmentation(cache_dir=model_path)
-
-    if fwd_path is not None:
-        basefwd = read_image(fwd_path)
-    else:
-        basefwd = 1 - base
-
-    plt.imshow(basefwd, cmap="gray")
-
-    pred = model(basefwd)
-    th = 0.6
-
-    # visualize segmentations
-    fig, ax = plt.subplots(1, len(model.targets), figsize=(15, 5))
-    for i, label in enumerate(model.targets):
-        ax[i].imshow(pred[0, i], cmap="gray")
-        ax[i].set_title(label)
-        ax[i].axis("off")
-
-    lung_mask = get_group_mask(pred, "lung", threshold=None)
-    bone_mask = get_group_mask(pred, "bone", threshold=None)
-
-    fig, ax = plt.subplots(1, 2, figsize=(5, 5))
-    a = ax[0].imshow(lung_mask)
-    fig.colorbar(a)
-    b = ax[1].imshow(bone_mask)
-    fig.colorbar(b)
-
-    d_lung_mask = mask_threshold(lung_mask.clone(), th)
-    d_bone_mask = mask_threshold(bone_mask.clone(), th)
-    d_only_lung_mask = substract_mask(d_lung_mask, d_bone_mask)
-    d_only_bone_mask = substract_mask(d_bone_mask, d_lung_mask)
-    d_rest_mask = substract_mask(
-        torch.ones_like(d_lung_mask), torch.bitwise_or(d_lung_mask, d_bone_mask)
-    )
-
-    fig, ax = plt.subplots(2, 2, figsize=(15, 5), sharey="row")
-    ax = ax.flatten()
-
-    ax[0].imshow(base, cmap="gray")
-    a = ax[1].imshow(d_only_lung_mask + d_bone_mask * 2 + d_rest_mask * 3)
-    plt.colorbar(a)
-    ax[3].hist(base.ravel(), bins=50, color="blue", label="Base")
-    ax[2].hist(
-        base[d_only_lung_mask.bool()].ravel(),
-        bins=50,
-        color="red",
-        alpha=0.2,
-        label="Only Lung",
-    )
-    ax[2].hist(
-        base[d_bone_mask.bool()].ravel(),
-        bins=50,
-        color="green",
-        alpha=0.2,
-        label="All Bone",
-    )
-    ax[2].hist(
-        base[d_rest_mask.bool()].ravel(),
-        bins=50,
-        color="yellow",
-        alpha=0.2,
-        label="Rest",
-    )
-    plt.legend()
-
-    plt.show()

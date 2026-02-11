@@ -19,6 +19,13 @@ from chest_xray_sim.data.segmentation_dataset import (
 )
 from chest_xray_sim.data.utils import read_image
 from chest_xray_sim.inverse import operators as ops
+from chest_xray_sim.visualization import (
+    plot_segmentation_overlay,
+    plot_transmission_maps as _plot_transmission_maps,
+    plot_histograms as _plot_histograms,
+    plot_windowing_lut,
+    plot_results,
+)
 
 # data loading vars
 model_path = "/Volumes/T7/datasets/torchxrayvision"
@@ -183,49 +190,13 @@ def load_example_images(size=4):
 
 
 def vis_overlay_mask_example(labels, img, mask, path="segmentation_masks.png"):
-    # assign matplotlib colors to labels
-    color_choices = [
-        "red",
-        "green",
-        "blue",
-    ]
-
-    label_colors = [(label, color_choices[i]) for i, label in enumerate(labels)]
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    # remove ticks
-    ax.imshow(img, interpolation="none", cmap="gray")
-    for i, (label, color) in enumerate(label_colors):
-        ax.imshow(
-            np.ma.masked_where(mask[i] == 0, np.ones_like(mask[i])),
-            interpolation="none",
-            alpha=0.5 * (mask[i] > 0),
-            cmap=ListedColormap([color]),
-            vmin=0,
-            vmax=1,
-        )
-        ax.plot([], color=color, label=label, linewidth=2)
-
-    ax.axis("off")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.legend()
-
+    fig, ax = plot_segmentation_overlay(img, mask, labels)
     fig.tight_layout()
-
     fig.savefig(f("segmentation_masks.png"))
 
 
 def plot_real_transmission_maps(maps):
-    fig, ax = plt.subplots(len(maps), 2, figsize=(16, 8 * len(maps)))
-
-    for i, (map, proc) in enumerate(maps):
-        ax[i, 0].imshow(map, cmap="gray")
-        ax[i, 0].axis("off")
-        ax[i, 1].imshow(proc, cmap="gray")
-        ax[i, 1].axis("off")
-
-    fig.tight_layout()
+    fig, ax = _plot_transmission_maps(maps)
     fig.savefig(f("transmission_maps.png"))
 
 
@@ -246,74 +217,12 @@ def plot_negative_log(image):
 
 
 def plot_txm_histograms(maps):
-    n = len(maps)
-    fig, ax = plt.subplots(n, 2, figsize=(16, 8 * n))
-    for i, (map_, proc_) in enumerate(maps):
-        ax[i, 0].imshow(map_, cmap="gray")
-        ax[i, 0].axis("off")
-        ax[i, 1].hist(map_.flatten(), bins=70)
-        ax[i, 1].set_xlim(0, 1)
-        ax[i, 1].set_xlabel("Pixel value")
-        ax[i, 1].set_ylabel("Frequency")
-
+    fig, ax = _plot_histograms(maps)
     fig.savefig(f("transmission_maps_histograms.png"))
 
 
 def plot_window_function():
-    values = np.linspace(0, 1, 500)
-    window_centers = [0.2, 0.5, 0.7]
-    window_widths = [0.2, 0.3, 0.5]
-    gammas = [1, 4, 10]
-    colors = ["red", "green", "blue"]
-
-    fig, ax = plt.subplots(
-        len(window_widths),
-        len(window_centers),
-        figsize=(16, 16),
-        sharex="col",
-        sharey="row",
-        gridspec_kw={
-            "left": 0.17
-        },  # Add moderate space on the left for row titles
-    )
-
-    # Set column titles first
-    for j, center in enumerate(window_centers):
-        ax[0, j].set_title(f"Window Center: {center}")
-
-    # Set row titles as separate text elements
-    for i, width in enumerate(window_widths):
-        # Calculate vertical position for row title (centered with the row)
-        row_pos = ax[i, 0].get_position().y0 + (
-            ax[i, 0].get_position().height / 2
-        )
-        fig.text(
-            0.15,
-            row_pos,
-            f"Window Width: {width}",
-            va="center",
-            ha="right",
-            fontsize=12,
-            rotation="horizontal",
-        )
-
-        # Add vertical and horizontal lines to each subplot
-        for j, center in enumerate(window_centers):
-            ax[i, j].axvline(x=center - width / 2, color="gray", linestyle="--")
-            ax[i, j].axvline(x=center + width / 2, color="gray", linestyle="--")
-            ax[i, j].axvline(x=center, color="gray", linestyle="--")
-
-            for color, gamma in zip(colors, gammas):
-                ax[i, j].plot(
-                    values,
-                    ops.window(values, center, width, gamma),
-                    label=f" Gamma: {gamma}",
-                    color=color,
-                )
-                ax[i, j].set_ylim(0, 1)
-
-            ax[i, j].legend()
-
+    fig, ax = plot_windowing_lut()
     fig.savefig(f("window_params.png"))
 
 
@@ -384,6 +293,8 @@ def plot_processed_tm_histogram(map0, img_window_params):
     ax[1, 0].axis("off")
 
     fig.savefig(f("processed_hist_cmp.png"))
+
+
 
 
 if __name__ == "__main__":
