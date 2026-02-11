@@ -14,24 +14,29 @@ reconstructed_tm = read_image(reconstructed_path).squeeze(0)
 real_fwd = read_image(real_fwd_path).squeeze(0)
 real_tm = read_image(real_tm_path).squeeze(0)
 
-print("real range", real_fwd.min(), real_fwd.max())
-print("real tm range", real_fwd.min(), real_fwd.max())
-print("shape", real_fwd.shape, reconstructed_tm.shape, real_tm.shape)
+def get_real_data():
+    return real_fwd, real_tm
 
-naive_tm = naive_inversion(jnp.array(real_fwd))
 
-fig, ax = plt.subplots(2, 3, figsize=(10, 5))
+if __name__ == "__main__":
+    print("real range", real_fwd.min(), real_fwd.max())
+    print("real tm range", real_fwd.min(), real_fwd.max())
+    print("shape", real_fwd.shape, reconstructed_tm.shape, real_tm.shape)
 
-labels = ["Naive TM", "Reconstructed TM", "Real TM"]
-for i, cmap in enumerate(["gray", "jet"]):
-    ax[i, 0].imshow(naive_tm, cmap=cmap, )
-    ax[i, 1].imshow(reconstructed_tm, cmap=cmap, vmin=0, vmax=1)
-    ax[i, 2].imshow(real_tm, cmap=cmap, vmin=0, vmax=1)
-    for j, lb in enumerate(labels):
-        ax[i, j].set_title(lb)
-        ax[i, j].axis("off")
+    naive_tm = naive_inversion(jnp.array(real_fwd))
 
-plt.tight_layout()
-plt.show()
-# plt.imshow(rough_tm, cmap="nipy_spectral")
-# plt.show()
+    fig, ax = plt.subplots(2, 3, figsize=(10, 5))
+
+    labels = ["Naive TM", "Reconstructed TM", "Real TM"]
+    for i, cmap in enumerate(["gray", "jet"]):
+        ax[i, 0].imshow(naive_tm, cmap=cmap, )
+        ax[i, 1].imshow(reconstructed_tm, cmap=cmap, vmin=0, vmax=1)
+        ax[i, 2].imshow(real_tm, cmap=cmap, vmin=0, vmax=1)
+        for j, lb in enumerate(labels):
+            ax[i, j].set_title(lb)
+            ax[i, j].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+    # plt.imshow(rough_tm, cmap="nipy_spectral")
+    # plt.show()

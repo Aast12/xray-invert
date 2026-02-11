@@ -45,13 +45,23 @@ class EvalMetrics:
                 ms_ssim=jnp.concatenate((self.ms_ssim, other.ms_ssim)),
                 psnr=jnp.concatenate((self.psnr, other.psnr)),
                 mse=jnp.concatenate((self.mse, other.mse)),
-                total_variation=jnp.concatenate((self.total_variation, other.total_variation)),
+                total_variation=jnp.concatenate(
+                    (self.total_variation, other.total_variation)
+                ),
                 tikonov=jnp.concatenate((self.tikonov, other.tikonov)),
-                band_similarity=jnp.concatenate((self.band_similarity, other.band_similarity)),
+                band_similarity=jnp.concatenate(
+                    (self.band_similarity, other.band_similarity)
+                ),
                 penalties=jnp.concatenate((self.penalties, other.penalties), axis=0),
-                bound_compliance=jnp.concatenate((self.bound_compliance, other.bound_compliance), axis=1),
-                min_violations=jnp.concatenate((self.min_violations, other.min_violations), axis=1),
-                max_violations=jnp.concatenate((self.max_violations, other.max_violations), axis=1),
+                bound_compliance=jnp.concatenate(
+                    (self.bound_compliance, other.bound_compliance), axis=1
+                ),
+                min_violations=jnp.concatenate(
+                    (self.min_violations, other.min_violations), axis=1
+                ),
+                max_violations=jnp.concatenate(
+                    (self.max_violations, other.max_violations), axis=1
+                ),
             )
         except ValueError as e:
             print(self, other)
@@ -75,7 +85,9 @@ def bound_compliance(
         compliance_count = jnp.where(mask > 0, compliancev.astype(jnp.int8), 0)
         compliance_count = jnp.sum(compliance_count, axis=(-2, -1))
 
-        compliance = compliance.at[i].set(compliance_count / mask_size)
+        compliance = compliance.at[i].set(
+            jnp.where(mask_size > 0, compliance_count / mask_size, 0.0)
+        )
 
     return compliance
 

@@ -42,7 +42,8 @@ class FolderDataset(torchvision.datasets.ImageFolder):
         self.root_dir = root
         self.extensions = extensions
 
-        is_valid_file = None if extensions is None else self.is_valid_file
+        # is_valid_file = None if extensions is None else self.is_valid_file
+        is_valid_file = self.is_valid_file
 
         super().__init__(
             root=root, is_valid_file=is_valid_file, allow_empty=True, **kwargs
@@ -58,6 +59,7 @@ class FolderDataset(torchvision.datasets.ImageFolder):
         Returns:
             True if the file has a valid image extension, False otherwise
         """
+        print("using legacy check")
         return is_file_type(path, self.extensions)
 
     def get_meta_data(self, abs_path: str) -> XRayImageMeta:
@@ -114,7 +116,6 @@ class MetaDataset(FolderDataset):
         self.root_dir = root
         self.metadata = pd.read_csv(meta_dir)
         self.metadata = self.filter_records(self.metadata)
-
         super().__init__(root=root, extensions=None, **kwargs)
 
     def filter_records(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -141,6 +142,7 @@ class Loader:
             self.dataset, batch_size=batch_size, shuffle=shuffle, **kwargs
         )
 
+    # todo: infer yield type from dataset
     def next(self) -> tuple[ImageTorch, list[XRayImageMeta]]:
         if self.iterator is None:
             self.iterator = iter(self.loader)

@@ -58,10 +58,9 @@ class ChexpertDataset(MetaDataset):
         **kwargs,
     ):
         self.root = root
-        self.frontal_lateral = frontal_lateral
+        self.frontal_lateral = frontal_lateral.lower() if frontal_lateral else None
         self.split = split
         data_dir = os.path.join(root, split) if split else root
-
         super().__init__(
             data_dir, meta_dir, transform=self.get_transform(image_size), **kwargs
         )
@@ -81,23 +80,19 @@ class ChexpertDataset(MetaDataset):
         )
 
     def is_valid_file(self, path: str) -> bool:
-        if self.frontal_lateral is None and self.split is None:
-            return True
+        record = self.metadata[self.metadata["abs_img_path"] == path]
 
-        view_check = (
-            self.frontal_lateral.lower() in path.lower()
-            if self.frontal_lateral is not None
-            else True
-        )
-        split_check = (
-            self.split.lower() in path.lower() if self.split is not None else True
-        )
+        if record.empty:
+            return False
 
-        return view_check and split_check
+        return True
 
     def filter_records(self, df: pd.DataFrame) -> pd.DataFrame:
+        df["frontal_lateral"] = df["frontal_lateral"].str.lower()
+        df["split"] = df["split"].str.lower()
+
         df = filter_key(df, "frontal_lateral", self.frontal_lateral)
-        df = filter_key(self.metadata, "split", self.split)
+        df = filter_key(df, "split", self.split)
 
         df["abs_img_path"] = df["path_to_image"].apply(
             lambda x: os.path.join(self.root, x.replace(".jpg", ".png"))

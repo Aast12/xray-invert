@@ -6,15 +6,19 @@ from utils import pull_image, sample_random
 import torch
 
 import wandb
-from chest_xray_sim.data.segmentation import MaskGroupsT
+from chest_xray_sim.segmentation.model import MaskGroupsT
+
 
 def is_array_like(obj):
-    return isinstance(obj, (np.ndarray, jnp.ndarray, torch.Tensor)) and obj.ndim > 0 
+    return isinstance(obj, (np.ndarray, jnp.ndarray, torch.Tensor)) and obj.ndim > 0
+
 
 def summary(body):
     try:
         for k, v in body.items():
             if is_array_like(v):
+                print(v.shape)
+                print(k, v.min(), v.max(), v.mean())
                 wandb.log({k: wandb.Histogram(v)})
             else:
                 wandb.summary[k] = v

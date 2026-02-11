@@ -3,7 +3,10 @@ from typing import Any
 
 import jax.numpy as jnp
 import joblib
-from chest_xray_sim.data.segmentation_dataset import get_segmentation_dataset
+from chest_xray_sim.data.dataset import Loader
+from chest_xray_sim.data.segmentation_dataset import (
+    SegmentationChexpertDataset,
+)
 from jaxtyping import Array, Float
 from utils.logging import summary
 from individual import IndividualSegmentationExperiment, default_params
@@ -20,8 +23,8 @@ from utils.tracking import (
 )
 
 import wandb
-from chest_xray_sim.data.chexpert_dataset import ChexpertMeta
-from chest_xray_sim.data.segmentation import batch_get_exclusive_masks
+from chest_xray_sim.data.chexpert import ChexpertMeta, to_xray_meta
+from chest_xray_sim.segmentation.utils import batch_get_exclusive_masks
 
 DEBUG = True
 DTYPE = jnp.float32
@@ -73,9 +76,9 @@ def run_processing(
     )
 
     # Verify the shape is correct
-    assert (
-        inputs.images.ndim == 3
-    ), f"Expected 3D images, got shape {inputs.images.shape}"
+    assert inputs.images.ndim == 3, (
+        f"Expected 3D images, got shape {inputs.images.shape}"
+    )
 
     hyperparams.segmentation_th = segmentation_th
 
@@ -89,7 +92,7 @@ def run_processing(
         "window_width": 0.23960231244564056,
     }
 
-    summary({'w0': w0})
+    summary({"w0": w0})
     # Build initial states (always per-image weights for this optimizer)
     txm0, w0_batched = build_segmentation_model_inputs(
         inputs,
@@ -109,7 +112,6 @@ def run_processing(
     # Run optimization
     state, _ = exp.optimize(inputs.images, txm0, w0_batched, inputs.segmentations)
 
-
     if state is not None:
         final_txm, final_weights = state
         final_pred = exp.forward(final_txm, final_weights)
@@ -123,9 +125,8 @@ def run_processing(
             value_ranges,
             results,
             save_dir=save_dir,
-            label=label
+            label=label,
         )
-
 
 
 def sweep_based_exec(dataset, project, tags, sweep_config):
@@ -145,10 +146,19 @@ def sweep_based_exec(dataset, project, tags, sweep_config):
         project=project,
     )
 
-    batch = next(iter(dataset))
+    # batch = next(iter(dataset))
+    batch = dataset.next()
     g_images, g_masks, g_meta = batch
 
-    real_im, real_mask, real_meta = joblib.load('/Volumes/T7/projs/thesis/data/real_tm.joblib')
+    print("DTYPES: ", g_images.dtype, g_masks.dtype)
+    print("SHAPES: ", g_images.shape, g_masks.shape)
+    print("LEN META: ", type(g_meta))
+    print("META SAMPLE: ", g_meta)
+
+    real_im, real_mask, real_meta = joblib.load(
+        "/Volumes/T7/projs/thesis/data/real_tm.joblib"
+    )
+    real_meta = [to_xray_meta(m) for m in real_meta]
 
     def sweep_runner():
         run = wandb.init(
@@ -159,7 +169,7 @@ def sweep_based_exec(dataset, project, tags, sweep_config):
         batch_size = len(batch)
         sub_batch_size = hyperparams.sub_batch_size
 
-        # sub_batch_size = 
+        # sub_batch_size =
 
         run.tags = run.tags + (
             f"batch_size={batch_size}",
@@ -169,9 +179,7 @@ def sweep_based_exec(dataset, project, tags, sweep_config):
         )
 
         save_dir = (
-            os.path.join(args.save_dir, run.id)
-            if args.save_dir is not None
-            else None
+            os.path.join(args.save_dir, run.id) if args.save_dir is not None else None
         )
 
         for i in range(0, len(g_images), sub_batch_size):
@@ -181,6 +189,7 @@ def sweep_based_exec(dataset, project, tags, sweep_config):
                 pass
 
             offset = i + sub_batch_size
+            print("offset: ", i, sub_batch_size, offset)
 
             images, masks, meta = (
                 g_images[i:offset],
@@ -196,7 +205,6 @@ def sweep_based_exec(dataset, project, tags, sweep_config):
                 value_ranges=value_ranges,
                 save_dir=save_dir,
             )
-        
 
         run_processing(
             real_im,
@@ -205,7 +213,7 @@ def sweep_based_exec(dataset, project, tags, sweep_config):
             hyperparams=hyperparams,
             value_ranges=value_ranges,
             save_dir=save_dir,
-            label='bench'
+            label="bench",
         )
 
     wandb.agent(
@@ -243,14 +251,20 @@ if __name__ == "__main__":
         batch_size_d.get("values", [batch_size_d.get("value", args.batch_size)])
     )
 
-    dataset = get_segmentation_dataset(
-        data_dir=args.data_dir,
+    dataset = SegmentationChexpertDataset(
+        root=args.data_dir,
         meta_dir=args.meta_dir,
         mask_dir=args.mask_dir,
         cache_dir=args.cache_dir,
         split=args.split,
         frontal_lateral=args.frontal_lateral,
+    )
+
+    dataset = Loader(
+        dataset,
         batch_size=batch_size,
+        collate_fn=SegmentationChexpertDataset.collate,
+        shuffle=False,
     )
 
     # Execute sweep

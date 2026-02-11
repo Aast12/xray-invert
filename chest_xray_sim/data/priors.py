@@ -5,12 +5,13 @@ import numpy as np
 import torch
 from jaxtyping import Array
 
-from chest_xray_sim.segmentation import (
+from chest_xray_sim.segmentation.model import (
     MASK_GROUPS,
     ChestSegmentation,
     MaskGroupsT,
-    batch_get_exclusive_masks,
 )
+from chest_xray_sim.segmentation.utils import batch_get_exclusive_masks
+
 from chest_xray_sim.data.utils import read_image
 from chest_xray_sim.types import ValueRangeT
 
@@ -142,6 +143,9 @@ def get_priors(
     real_tm_images = jnp.array(real_tm_data.cpu().numpy()).squeeze(1)
     real_tm_segmentations = jnp.array(real_tm_segmentations.cpu().numpy())
 
+    print("dtypes: ", real_tm_images.dtype, real_tm_segmentations.dtype)
+    print("shapes: ", real_tm_images.shape, real_tm_segmentations.shape)
+
     seg_labels, value_ranges = extract_region_value_ranges(
         real_tm_images,
         real_tm_segmentations,
@@ -155,4 +159,3 @@ def get_priors(
         return seg_labels, np.array(value_ranges)
 
     return seg_labels, value_ranges
-
