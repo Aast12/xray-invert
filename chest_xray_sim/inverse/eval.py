@@ -38,34 +38,49 @@ class EvalMetrics:
     max_violations: Float[Array, "reduced_labels batch"]
 
     def concat(self, other: "EvalMetrics") -> "EvalMetrics":
-        """Concatenate two EvalMetrics objects."""
-        try:
-            return EvalMetrics(
-                ssim=jnp.concatenate((self.ssim, other.ssim)),
-                ms_ssim=jnp.concatenate((self.ms_ssim, other.ms_ssim)),
-                psnr=jnp.concatenate((self.psnr, other.psnr)),
-                mse=jnp.concatenate((self.mse, other.mse)),
-                total_variation=jnp.concatenate(
-                    (self.total_variation, other.total_variation)
-                ),
-                tikonov=jnp.concatenate((self.tikonov, other.tikonov)),
-                band_similarity=jnp.concatenate(
-                    (self.band_similarity, other.band_similarity)
-                ),
-                penalties=jnp.concatenate((self.penalties, other.penalties), axis=0),
-                bound_compliance=jnp.concatenate(
-                    (self.bound_compliance, other.bound_compliance), axis=1
-                ),
-                min_violations=jnp.concatenate(
-                    (self.min_violations, other.min_violations), axis=1
-                ),
-                max_violations=jnp.concatenate(
-                    (self.max_violations, other.max_violations), axis=1
-                ),
-            )
-        except ValueError as e:
-            print(self, other)
-            return self
+        """Concatenate two EvalMetrics objects along the batch dimension."""
+        _1d = jnp.atleast_1d
+        return EvalMetrics(
+            ssim=jnp.concatenate((_1d(self.ssim), _1d(other.ssim))),
+            ms_ssim=jnp.concatenate((_1d(self.ms_ssim), _1d(other.ms_ssim))),
+            psnr=jnp.concatenate((_1d(self.psnr), _1d(other.psnr))),
+            mse=jnp.concatenate((_1d(self.mse), _1d(other.mse))),
+            total_variation=jnp.concatenate(
+                (_1d(self.total_variation), _1d(other.total_variation))
+            ),
+            tikonov=jnp.concatenate((_1d(self.tikonov), _1d(other.tikonov))),
+            band_similarity=jnp.concatenate(
+                (_1d(self.band_similarity), _1d(other.band_similarity))
+            ),
+            penalties=jnp.concatenate((_1d(self.penalties), _1d(other.penalties)), axis=0),
+            bound_compliance=jnp.concatenate(
+                (self.bound_compliance, other.bound_compliance), axis=1
+            ),
+            min_violations=jnp.concatenate(
+                (self.min_violations, other.min_violations), axis=1
+            ),
+            max_violations=jnp.concatenate(
+                (self.max_violations, other.max_violations), axis=1
+            ),
+        )
+
+    @classmethod
+    def merge(cls, metrics_list: list["EvalMetrics"]) -> "EvalMetrics":
+        """Merge a list of EvalMetrics into one by concatenating along the batch dimension."""
+        _1d = jnp.atleast_1d
+        return cls(
+            ssim=jnp.concatenate([_1d(m.ssim) for m in metrics_list]),
+            ms_ssim=jnp.concatenate([_1d(m.ms_ssim) for m in metrics_list]),
+            psnr=jnp.concatenate([_1d(m.psnr) for m in metrics_list]),
+            mse=jnp.concatenate([_1d(m.mse) for m in metrics_list]),
+            total_variation=jnp.concatenate([_1d(m.total_variation) for m in metrics_list]),
+            tikonov=jnp.concatenate([_1d(m.tikonov) for m in metrics_list]),
+            band_similarity=jnp.concatenate([_1d(m.band_similarity) for m in metrics_list]),
+            penalties=jnp.concatenate([_1d(m.penalties) for m in metrics_list], axis=0),
+            bound_compliance=jnp.concatenate([m.bound_compliance for m in metrics_list], axis=1),
+            min_violations=jnp.concatenate([m.min_violations for m in metrics_list], axis=1),
+            max_violations=jnp.concatenate([m.max_violations for m in metrics_list], axis=1),
+        )
 
 
 def bound_compliance(
@@ -139,8 +154,8 @@ def batch_evaluation(
     compliance = bound_compliance(pred, segmentation, value_ranges)
     max_violations, min_violations = bound_violations(pred, segmentation, value_ranges)
 
-    low_similarity = unsharp_mask_similarity(pred, images, sigma=3.0)
-    high_similarity = unsharp_mask_similarity(pred, images, sigma=10.0)
+    low_similarity = unsharp_mask_similarity(pred, images, sigma=3.0, reduction="none")
+    high_similarity = unsharp_mask_similarity(pred, images, sigma=10.0, reduction="none")
 
     return EvalMetrics(
         ssim=ssim_val,

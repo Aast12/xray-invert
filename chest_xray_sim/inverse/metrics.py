@@ -395,7 +395,7 @@ def unsharp_mask_similarity(
     pred: Float[Array, "batch height width"],
     target: Float[Array, "batch height width"],
     sigma=3.0,
-    reduction: typing.Literal["mean", "sum", "max"] = "mean",
+    reduction: typing.Literal["mean", "sum", "max", "none"] = "mean",
 ):
     x_detail = (
         pred
@@ -418,7 +418,9 @@ def unsharp_mask_similarity(
 
     detail_diff = (x_detail - y_detail) ** 2
 
-    if reduction == "max":
+    if reduction == "none":
+        return detail_diff.mean(axis=(-2, -1))
+    elif reduction == "max":
         return detail_diff.max()
     elif reduction == "mean":
         return detail_diff.mean()
