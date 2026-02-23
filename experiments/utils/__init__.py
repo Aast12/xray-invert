@@ -203,17 +203,19 @@ def experiment_args(**arguments):
     return parse_args
 
 
-def pull_image(img, bits=8, logger=wandb.log):
+def pull_image(img, bits=8, logger=None):
     rng = 2**bits - 1
     dtype = BIT_DTYPES[bits]
     return wandb.Image(np.array(img * rng, dtype=dtype))
 
 
-def log_image(label: str, img, bits=8, logger=wandb.log):
+def log_image(label: str, img, bits=8, logger=None):
     """
     Log an image to wandb with a specified label and bit depth.
     Assumes the image is in the range [0, 1] and scales it to the specified bit depth.
     """
+    if logger is None:
+        logger = wandb.log
     rng = 2**bits - 1
     dtype = BIT_DTYPES[bits]
     logger({label: wandb.Image(np.array(img * rng, dtype=dtype))})

@@ -18,13 +18,12 @@ dependencies = [
     "opencv-python>=4.11.0.86",
     "joblib>=1.5.0",
     "jupyterlab>=4.5.4",
+    "seaborn>=0.13.2",
+    "wandb>=0.24",
 ]
 
 [project.optional-dependencies]
-experiments = [
-    "wandb>=0.24",
-    "seaborn>=0.13.2",
-]
+experiments = []
 
 [tool.uv.sources]
 chest-xray-sim = { workspace = true }

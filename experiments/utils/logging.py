@@ -13,30 +13,30 @@ def is_array_like(obj):
     return isinstance(obj, (np.ndarray, jnp.ndarray, torch.Tensor)) and obj.ndim > 0
 
 
-def summary(body):
+def _wandb_active():
     try:
-        for k, v in body.items():
-            if is_array_like(v):
-                print(v.shape)
-                print(k, v.min(), v.max(), v.mean())
-                wandb.log({k: wandb.Histogram(v)})
-            else:
-                wandb.summary[k] = v
-    except wandb.Error:
-        pass
+        return wandb.run is not None
+    except AttributeError:
+        return False
+
+
+def summary(body):
+    if not _wandb_active():
+        return
+    for k, v in body.items():
+        if is_array_like(v):
+            print(v.shape)
+            print(k, v.min(), v.max(), v.mean())
+            wandb.log({k: wandb.Histogram(v)})
+        else:
+            wandb.summary[k] = v
 
 
 def log(body):
-    try:
-        mapped = {
-            k: v if not is_array_like(v) else wandb.Histogram(v)
-            for k, v in body.items()
-        }
-        wandb.log(mapped)
-    except wandb.Error:
-        pass
-    except Exception as e:
-        raise e
+    if not _wandb_active():
+        return
+    mapped = {k: v if not is_array_like(v) else wandb.Histogram(v) for k, v in body.items()}
+    wandb.log(mapped)
 
 
 def empty_logger(body):

@@ -7,7 +7,6 @@ Usage:
     uv run python experiments/replicate.py --run-id cuhsitz3 --batch-size 32 --batches 3
 """
 
-import functools
 import os
 
 import jax.numpy as jnp
@@ -15,7 +14,7 @@ import joblib
 import seaborn as sns
 from chest_xray_sim.data.dataset import Loader
 from chest_xray_sim.data.segmentation_dataset import SegmentationChexpertDataset
-from chest_xray_sim.inverse.eval import batch_evaluation
+from chest_xray_sim.inverse.eval import EvalMetrics, batch_evaluation
 from chest_xray_sim.pipeline.inputs import prepare_torch_inputs
 from jaxtyping import Array, Float
 from models import (
@@ -279,7 +278,7 @@ if __name__ == "__main__":
             for k in weights_list[0].keys()
         }
         pred = jnp.concatenate(pred_list, axis=0)
-        metrics = functools.reduce(lambda x, y: x.concat(y), metrics_list[1:], metrics_list[0])
+        metrics = EvalMetrics.merge(metrics_list)
 
         # Save to cache
         joblib.dump(imgs, os.path.join(cache_path, "imgs.joblib"))

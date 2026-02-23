@@ -390,7 +390,7 @@ def psnr(pred: Float[Array, "*dims"], target: Float[Array, "*dims"]):
     return dmp_metric(dmp.psnr, pred, target)
 
 
-@partial(jax.jit, static_argnums=(2))
+@partial(jax.jit, static_argnums=(2, 3))
 def unsharp_mask_similarity(
     pred: Float[Array, "batch height width"],
     target: Float[Array, "batch height width"],
